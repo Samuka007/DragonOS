@@ -1,0 +1,5 @@
+{
+    "files.autoSave": "afterDelay",
+    "terminal.integrated.fontFamily": "Droid Sans Mono Dotted for Powerline",
+    "editor.fontWeight": "bold"
+}
