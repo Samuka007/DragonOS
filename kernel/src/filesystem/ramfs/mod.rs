@@ -27,7 +27,7 @@ const RAMFS_MAX_NAMELEN: usize = 64;
 
 /// @brief 内存文件系统的Inode结构体
 #[derive(Debug)]
-struct LockedRamFSInode(SpinLock<RamFSInode<'static>>);
+struct LockedRamFSInode(SpinLock<RamFSInode>);
 
 /// @brief 内存文件系统结构体
 #[derive(Debug)]
@@ -38,21 +38,19 @@ pub struct RamFS {
 
 /// @brief 内存文件系统的Inode结构体(不包含锁)
 #[derive(Debug)]
-pub struct RamFSInode<'a> {
+pub struct RamFSInode {
     // parent变量目前只在find函数中使用到
     // 所以只有当inode是文件夹的时候，parent才会生效
     // 对于文件来说，parent就没什么作用了
     // 关于parent的说明: 目录不允许有硬链接
-    /// name
-    node_name: String,
     /// 指向父Inode的弱引用
     parent: Weak<LockedRamFSInode>,
     /// 指向自身的弱引用
     self_ref: Weak<LockedRamFSInode>,
     /// 子Inode的B树
-    children: BTreeMap<&'a String, Arc<LockedRamFSInode>>,
+    children: BTreeMap<Arc<String>, Arc<LockedRamFSInode>>,
     /// inode_id index
-    id_index: BTreeMap<InodeId, &'a String>,
+    id_index: BTreeMap<InodeId, Weak<String>>,
     /// 当前inode的数据部分
     data: Vec<u8>,
     /// 当前inode的元数据
@@ -87,7 +85,6 @@ impl RamFS {
         // 初始化root inode
         let root: Arc<LockedRamFSInode> = Arc::new( 
             LockedRamFSInode( SpinLock::new( RamFSInode {
-            node_name: String::new(),
             parent: Weak::default(),
             self_ref: Weak::default(),
             children: BTreeMap::new(),
@@ -264,7 +261,7 @@ impl IndexNode for LockedRamFSInode {
         data: usize,
     ) -> Result<Arc<dyn IndexNode>, SystemError> {
         // 获取当前inode
-        let mut inode: SpinLockGuard<'_, RamFSInode<'_>> = self.0.lock();
+        let mut inode: SpinLockGuard<RamFSInode> = self.0.lock();
         // 如果当前inode不是文件夹，则返回
         if inode.metadata.file_type != FileType::Dir {
             return Err(SystemError::ENOTDIR);
@@ -278,7 +275,6 @@ impl IndexNode for LockedRamFSInode {
 
         // 创建inode
         let result: Arc<LockedRamFSInode> = Arc::new(LockedRamFSInode(SpinLock::new(RamFSInode {
-            node_name: String::from(name),
             parent: inode.self_ref.clone(),
             self_ref: Weak::default(),
             children: BTreeMap::new(),
@@ -307,19 +303,13 @@ impl IndexNode for LockedRamFSInode {
         // 初始化inode的自引用的weak指针
         result.0.lock().self_ref = Arc::downgrade(&result);
 
-        let name_ref: &String = &result.0.lock().node_name;
+        let name_ref = Arc::new(String::from(name));
 
         // 将子inode插入父inode的B树中
-        inode.children.insert(
-            name_ref, 
-            result.clone()
-        );
+        inode.children.insert(name_ref.clone(), result.clone());
 
         // 将inode插入inode索引中
-        inode.id_index.insert(
-            id_tmp, 
-            name_ref
-        );
+        inode.id_index.insert(id_tmp, Arc::downgrade(&name_ref));
 
         return Ok(result);
     }
@@ -346,13 +336,15 @@ impl IndexNode for LockedRamFSInode {
             return Err(SystemError::EEXIST);
         }
 
+        let name_ref = Arc::new(String::from(name));
+
         inode
             .children
-            .insert(&other_locked.node_name, other_locked.self_ref.upgrade().unwrap());
+            .insert(name_ref.clone(), other_locked.self_ref.upgrade().unwrap());
 
         inode
             .id_index
-            .insert(other_locked.metadata.inode_id, &other_locked.node_name);
+            .insert(other_locked.metadata.inode_id, Arc::downgrade(&name_ref));
 
         // 增加硬链接计数
         other_locked.metadata.nlinks += 1;
@@ -458,40 +450,13 @@ impl IndexNode for LockedRamFSInode {
                 return Ok(String::from(".."));
             }
             _ => {
-                // 暴力遍历所有的children，判断inode id是否相同
-                // TODO: 优化这里，这个地方性能很差！
-                // let mut key: Vec<String> = inode
-                //     .children
-                //     .keys()
-                //     .filter(|k| {
-                //         inode
-                //             .children
-                //             .get(*k)
-                //             .unwrap()
-                //             .0
-                //             .lock()
-                //             .metadata
-                //             .inode_id
-                //             .into()
-                //             == ino
-                //     })
-                //     .cloned()
-                //     .collect();
-
-                // match key.len() {
-                //     0=>{return Err(SystemError::ENOENT);}
-                //     1=>{return Ok(key.remove(0));}
-                //     _ => panic!("Ramfs get_entry_name: key.len()={key_len}>1, current inode_id={inode_id:?}, to find={to_find:?}", key_len=key.len(), inode_id = inode.metadata.inode_id, to_find=ino)
-                // }
-
-                let key: Option<String> = inode
+                let key = inode
                     .id_index
-                    .get(&ino)
-                    .map(|k| String::from(*k));
+                    .get(&ino);
 
                 match key {
                     Some(k) => {
-                        return Ok(k);
+                        return Ok(k.upgrade().unwrap().to_string());
                     }
                     None => {
                         return Err(SystemError::ENOENT);
@@ -510,7 +475,7 @@ impl IndexNode for LockedRamFSInode {
         let mut keys: Vec<String> = Vec::new();
         keys.push(String::from("."));
         keys.push(String::from(".."));
-        keys.extend(self.0.lock().children.keys().cloned().map(String::from));
+        keys.extend(self.0.lock().children.keys().map(|k| k.to_string()));
 
         return Ok(keys);
     }
@@ -533,7 +498,6 @@ impl IndexNode for LockedRamFSInode {
         }
 
         let nod = Arc::new(LockedRamFSInode(SpinLock::new(RamFSInode {
-            node_name: String::from(filename),
             parent: inode.self_ref.clone(),
             self_ref: Weak::default(),
             children: BTreeMap::new(),
@@ -575,9 +539,15 @@ impl IndexNode for LockedRamFSInode {
             unimplemented!()
         }
 
+        let fname_ref = Arc::new(String::from(filename).to_uppercase());
+
         inode
             .children
-            .insert(&nod.0.lock().node_name, nod.clone());
+            .insert(fname_ref.clone(), nod.clone());
+
+        inode
+            .id_index
+            .insert(nod.0.lock().metadata.inode_id, Arc::downgrade(&fname_ref));
         Ok(nod)
     }
 

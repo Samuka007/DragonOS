@@ -90,7 +90,7 @@ install_archlinux_pkg()
 	curl wget bridge-utils dnsmasq \
         diffutils pkgconf which unzip util-linux dosfstools \
         gcc make flex texinfo gmp mpfr qemu-base \
-        libmpc libssl-dev
+        libmpc
 
 }
 
