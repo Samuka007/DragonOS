@@ -8,9 +8,7 @@ use alloc::{boxed::Box, collections::LinkedList, string::String, sync::Arc};
 use system_error::SystemError;
 
 use crate::{
-    driver::{
-        tty::serial::serial8250::send_to_default_serial8250_port, video::video_refresh_manager,
-    },
+    driver::{serial::serial8250::send_to_default_serial8250_port, video::video_refresh_manager},
     libs::{lib_ui::textui::textui_is_enable_put_to_window, rwlock::RwLock, spinlock::SpinLock},
     mm::VirtAddr,
 };
@@ -411,12 +409,22 @@ pub fn scm_disable_put_to_window() {
 /// 当内存管理单元被初始化之后，重新处理帧缓冲区问题
 #[inline(never)]
 pub fn scm_reinit() -> Result<(), SystemError> {
-    let r = true_scm_reinit();
-    if r.is_err() {
-        send_to_default_serial8250_port("scm reinit failed.\n\0".as_bytes());
+    #[cfg(target_arch = "x86_64")]
+    {
+        let r = true_scm_reinit();
+        if r.is_err() {
+            send_to_default_serial8250_port("scm reinit failed.\n\0".as_bytes());
+        }
+        return r;
     }
-    return r;
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        return Ok(());
+    }
 }
+
+#[allow(dead_code)]
 fn true_scm_reinit() -> Result<(), SystemError> {
     video_refresh_manager()
         .video_reinitialize(false)

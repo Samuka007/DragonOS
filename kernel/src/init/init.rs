@@ -3,7 +3,7 @@ use crate::{
         init::{early_setup_arch, setup_arch, setup_arch_post},
         CurrentIrqArch, CurrentSMPArch, CurrentSchedArch,
     },
-    driver::{base::init::driver_init, tty::init::tty_early_init, video::VideoRefreshManager},
+    driver::{base::init::driver_init, serial::serial_early_init, video::VideoRefreshManager},
     exception::{init::irq_init, softirq::softirq_init, InterruptArch},
     filesystem::vfs::core::vfs_init,
     include::bindings::bindings::acpi_init,
@@ -18,7 +18,7 @@ use crate::{
     mm::init::mm_init,
     process::{kthread::kthread_init, process_init, ProcessManager},
     sched::{core::sched_init, SchedArch},
-    smp::SMPArch,
+    smp::{early_smp_init, SMPArch},
     syscall::Syscall,
     time::{
         clocksource::clocksource_boot_finish, timekeeping::timekeeping_init, timer::timer_init,
@@ -47,16 +47,23 @@ fn do_start_kernel() {
 
     early_setup_arch().expect("setup_arch failed");
     unsafe { mm_init() };
+
     scm_reinit().unwrap();
     textui_init().unwrap();
     init_intertrait();
+
     vfs_init().expect("vfs init failed");
     driver_init().expect("driver init failed");
-    unsafe { acpi_init() };
-    irq_init().expect("irq init failed");
-    CurrentSMPArch::prepare_cpus().expect("prepare_cpus failed");
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        acpi_init()
+    };
+
+    early_smp_init().expect("early smp init failed");
+    irq_init().expect("irq init failed");
     setup_arch().expect("setup_arch failed");
+    CurrentSMPArch::prepare_cpus().expect("prepare_cpus failed");
 
     process_init();
     sched_init();
@@ -81,7 +88,7 @@ fn do_start_kernel() {
 /// 在内存管理初始化之前，执行的初始化
 #[inline(never)]
 fn init_before_mem_init() {
-    tty_early_init().expect("tty early init failed");
+    serial_early_init().expect("serial early init failed");
     let video_ok = unsafe { VideoRefreshManager::video_init().is_ok() };
     scm_init(video_ok);
 }

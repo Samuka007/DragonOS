@@ -297,7 +297,8 @@ impl Syscall {
 
         // drop guard 以避免无法调度的问题
         drop(fd_table_guard);
-        let r = file.lock_no_preempt().inode().ioctl(cmd, data);
+        let file = file.lock_no_preempt();
+        let r = file.inode().ioctl(cmd, data, &file.private_data);
         return r;
     }
 
@@ -573,6 +574,15 @@ impl Syscall {
         }
     }
 
+    pub fn rmdir(pathname: *const u8) -> Result<usize, SystemError> {
+        let pathname: String = check_and_clone_cstr(pathname, Some(MAX_PATHLEN))?;
+        if pathname.len() >= MAX_PATHLEN {
+            return Err(SystemError::ENAMETOOLONG);
+        }
+        let pathname = pathname.as_str().trim();
+        return do_remove_dir(AtFlags::AT_FDCWD.bits(), pathname).map(|v| v as usize);
+    }
+
     pub fn unlink(pathname: *const u8) -> Result<usize, SystemError> {
         if pathname.is_null() {
             return Err(SystemError::EFAULT);
@@ -683,7 +693,7 @@ impl Syscall {
                 for i in arg..FileDescriptorVec::PROCESS_MAX_FD {
                     let binding = ProcessManager::current_pcb().fd_table();
                     let mut fd_table_guard = binding.write();
-                    if fd_table_guard.get_file_by_fd(fd).is_none() {
+                    if fd_table_guard.get_file_by_fd(i as i32).is_none() {
                         return Self::do_dup2(fd, i as i32, &mut fd_table_guard);
                     }
                 }
