@@ -1,7 +1,7 @@
 use core::{hint::spin_loop, sync::atomic::Ordering};
 
 use alloc::{string::ToString, sync::Arc};
-use path_base::Path;
+use path_base::{Path, PathBuf};
 use system_error::SystemError;
 
 use crate::{
@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    file::FileMode, utils::user_path_at, IndexNode, InodeId, VFS_MAX_FOLLOW_SYMLINK_TIMES,
+    file::FileMode, syscall::UmountFlag, utils::user_path_at, IndexNode, InodeId, VFS_MAX_FOLLOW_SYMLINK_TIMES
 };
 
 /// @brief 原子地生成新的Inode号。
@@ -291,4 +291,46 @@ pub fn do_mount(fs: Arc<dyn FileSystem>, mount_point: &Path) -> Result<usize, Sy
         .lookup_follow_symlink(mount_point, VFS_MAX_FOLLOW_SYMLINK_TIMES)?
         .mount(fs.clone())?;
     Ok(0)
+}
+
+
+pub fn do_umount2(dirfd: i32, mut target: PathBuf, flag: UmountFlag) -> Result<(), SystemError> {
+    // Todo: Check permission
+    // make abs path
+    if target.is_relative() {
+        let (work, rest) = user_path_at(&ProcessManager::current_pcb(), dirfd, &target)?;
+        target = work.abs_path()?.join(rest);
+    }
+    debug_assert!(target.is_absolute(), "Couldn't find target abs path!");
+
+    let do_umount = || -> Result<(), SystemError> {
+        let umount_path = MountPath::from(target);
+        if MOUNTS_LIST().read().contains_key(&umount_path) {
+            kdebug!("Umount Target found!");
+            // check fd
+            // check 
+            unimplemented!();
+        }
+        return Err(SystemError::EINVAL);
+    };
+    return match flag {
+        UmountFlag::DEFAULT => {
+            do_umount()
+        },
+        UmountFlag::MNT_FORCE => {
+            Err(SystemError::ENOSYS)
+        },
+        UmountFlag::MNT_DETACH => {
+            Err(SystemError::ENOSYS)
+        },
+        UmountFlag::MNT_EXPIRE => {
+            Err(SystemError::ENOSYS)
+        },
+        UmountFlag::UMOUNT_NOFOLLOW => {
+            do_umount()
+        },
+        _ => {
+            Err(SystemError::EINVAL)
+        }
+    };
 }

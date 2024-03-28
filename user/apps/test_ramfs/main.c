@@ -84,6 +84,12 @@ int main(int argc, char const* argv[]) {
     fprintf(file3, "This is file3.txt\n");
     fclose(file3);
 
+    // test umount with flags ( use umount2 )
+    if (umount2("/some/ramfs/some/another/just_another", MNT_DETACH) == -1) {
+        perror("Failed to umount ramfs at /some/ramfs/some/another/just_another");
+        return 1;
+    }
+
     // // Delete files under /some/ramfs and /some/ramfs/some/another
     // if (unlink("/some/ramfs/file1.txt") == -1) {
     //     perror("Failed to delete /some/ramfs/file1.txt");

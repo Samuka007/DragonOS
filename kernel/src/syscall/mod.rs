@@ -992,6 +992,14 @@ impl Syscall {
                 let filesystemtype = args[2] as *const u8;
                 return Self::mount(source, target, filesystemtype, 0, null());
             }
+
+            SYS_UMOUNT => {
+                let target = args[0] as *const u8;
+                let flags = args[1] as i32;
+                Self::umount2(target, flags)?;
+                return Ok(0);
+            }
+
             SYS_NEWFSTATAT => {
                 // todo: 这个系统调用还没有实现
 
