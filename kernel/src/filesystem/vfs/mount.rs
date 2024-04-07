@@ -80,6 +80,9 @@ impl MountFS {
         self.self_ref.upgrade().unwrap()
     }
 
+    /// 卸载文件系统
+    /// # Errors
+    /// 如果当前文件系统是根文件系统，那么将会返回`EINVAL`
     pub fn umount(&self) -> Result<(), SystemError> {
         if let Some(parent) = &self.self_mountpoint {
             return parent.umount();
@@ -132,10 +135,9 @@ impl MountFSInode {
 
     fn umount(&self) -> Result<(), SystemError> {
         // 移除挂载点
-        // 不加检查或许可能导致未定义行为
-        // if metadata.file_type != FileType::Dir {
-        //     return Err(SystemError::ENOTDIR);
-        // }
+        if self.metadata()?.file_type != FileType::Dir {
+            return Err(SystemError::ENOTDIR);
+        }
         self.mount_fs
             .mountpoints
             .lock()

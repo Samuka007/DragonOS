@@ -481,9 +481,9 @@ impl dyn IndexNode {
     ///
     /// - path: 路径
     ///
-    /// # Err
-    /// - SystemError::ENOENT: 未找到
-    /// - SystemError::ENOTDIR: 不是目录
+    /// # Errors
+    /// - `ENOENT`: 未找到
+    /// - `ENOTDIR`: 不是目录
     pub fn lookup(&self, path: &Path) -> Result<Arc<dyn IndexNode>, SystemError> {
         self.lookup_follow_symlink(path, 0)
     }
@@ -493,9 +493,9 @@ impl dyn IndexNode {
     /// - path: 路径
     /// - max_follow_times: 最大跟随次数
     ///
-    /// # Err
-    /// - SystemError::ENOENT: 未找到
-    /// - SystemError::ENOTDIR: 不是目录
+    /// # Errors
+    /// - `ENOENT`: 未找到
+    /// - `ENOTDIR`: 不是目录
     pub fn lookup_follow_symlink<T: AsRef<Path>>(
         &self,
         path_any: T,
@@ -553,9 +553,9 @@ impl dyn IndexNode {
     /// - path: 路径
     /// - max_follow_times: 最大跟随次数
 
-    /// # Err
-    /// - SystemError::ENOENT: 未找到
-    /// - SystemError::ENOTDIR: 不是目录
+    /// # Errors
+    /// - `ENOENT`: 未找到
+    /// - `ENOTDIR`: 不是目录
     fn _lookup_follow_symlink(
         &self,
         path: &str,
@@ -635,8 +635,8 @@ impl dyn IndexNode {
     ///
     /// - rest_path: 剩余路径
     /// - max_follow_times: 最大跟随次数
-    /// ## Err
-    /// - SystemError::ENOENT: 未找到
+    /// ## Errors
+    /// - `ENOENT`: 未找到
     fn lookup_walk(
         &self,
         rest_path: &Path,
@@ -695,14 +695,12 @@ impl dyn IndexNode {
         ));
     }
 
-    /// 在dcache中快速查找目录项，返回 *找到的最近节点* 与 *剩余路径*
+    /// 在dcache中快速查找目录项，返回 *找到的最近节点* 与 *剩余路径*, 未找到返回 `None`
     ///
     /// - cache: 缓存
     /// - abs_path: 绝对路径
     /// - rest_path: 剩余路径
     /// - stop_path: 停止路径
-    /// # None
-    /// 未找到
     fn quick_lookup<'a>(
         cache: Arc<DefaultDCache>,
         abs_path: &'a Path,

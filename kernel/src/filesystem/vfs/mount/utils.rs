@@ -5,6 +5,7 @@ use alloc::{
     sync::{Arc, Weak},
 };
 use path_base::{clean_path::Clean, Path, PathBuf};
+use system_error::SystemError;
 
 #[derive(PartialEq, Eq, Debug)]
 pub struct MountPath(PathBuf);
@@ -85,7 +86,7 @@ impl MountList {
     /// 未找到挂载点
     pub fn get<T: AsRef<Path>>(path: T) -> Option<(PathBuf, PathBuf, Arc<MountFS>)> {
         MountList::instance()
-            .upgradeable_read()
+            .read()
             .iter()
             .filter_map(|(key, value)| {
                 let strkey = key.as_ref();
@@ -97,5 +98,15 @@ impl MountList {
                 None
             })
             .next()
+    }
+
+    /// 删除 **路径`path`** 的挂载点记录，并返回 *被移除的挂载点引用*
+    /// # Errors
+    /// - `SystemError::EINVAL`: 挂载点仍未被卸载或仍在使用
+    pub fn remove<T: AsRef<Path>>(path: T) -> Result<Weak<MountFS>, SystemError> {
+        MountList::instance()
+            .write()
+            .remove(&MountPath::from(path.as_ref()))
+            .ok_or(SystemError::ENOENT)
     }
 }

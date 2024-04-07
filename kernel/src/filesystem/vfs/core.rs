@@ -296,9 +296,7 @@ pub fn do_mount(
         ROOT_INODE().lookup_follow_symlink(&mount_point, VFS_MAX_FOLLOW_SYMLINK_TIMES)?;
     let mnt_fs = mnt_point.mount(fs.clone())?;
     // kdebug!("{:?}", mnt_point.abs_path()?);
-    MOUNT_LIST()
-        .write()
-        .insert(MountPath::from(mnt_point.abs_path()?), mnt_fs);
+    MountList::insert(mnt_point.abs_path()?, &mnt_fs);
     Ok(0)
 }
 
@@ -312,17 +310,14 @@ pub fn do_umount2(dirfd: i32, mut target: PathBuf, flag: UmountFlag) -> Result<(
     debug_assert!(target.is_absolute(), "Couldn't find target abs path!");
 
     let do_umount = || -> Result<(), SystemError> {
-        let umount_path = MountPath::from(target);
-        // kdebug!("Removing {umount_path:?}");
-        // kdebug!("Items in Mount lists: {:?}", MOUNTS_LIST().read().keys().collect::<Vec<_>>());
-        if let Some(mnt_fs) = MOUNT_LIST().write().remove(&umount_path) {
+
+        if let Ok(mnt_fs) = MountList::remove(&target) {
             // Todo: 占用检测
             // kdebug!("Umount Target found!");
-            return mnt_fs
-                .as_any_ref()
-                .downcast_ref::<MountFS>()
-                .unwrap()
-                .umount();
+            if let Some(fs) = mnt_fs.upgrade() {
+                return fs.umount();
+            }
+            kwarn!("Unexpected Mountpoint Deprecated!");
         }
         return Err(SystemError::EINVAL);
     };
