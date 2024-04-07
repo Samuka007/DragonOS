@@ -13,8 +13,6 @@
 
 
 int main(int argc, char const* argv[]) {
-    char ramfs_path[MAX_PATH_LENGTH] = "/some/ramfs";
-    char another_ramfs_path[MAX_PATH_LENGTH] = "/some/ramfs/some/another";
 
     if (mkdir("/some", 0777) == -1) {
         perror("Failed to create directory under /some");
@@ -73,44 +71,32 @@ int main(int argc, char const* argv[]) {
         perror("Failed to open /some/ramfs/some/another/file2.txt");
         return 1;
     }
-    fprintf(file2, "This is file2.txt\n");
     fclose(file2);
 
-    FILE* file3 = fopen("/some/ramfs/some/another/just_another/file3.txt", "w");
-    if (file2 == NULL) {
+    FILE* file3 = fopen("/some/ramfs/some/another/just_another/file3.txt", "w+");
+    if (file3 == NULL) {
         perror("Failed to open /some/ramfs/some/another/just_another/file3.txt");
         return 1;
     }
-    fprintf(file3, "This is file3.txt\n");
+    fprintf(file3, "Multi mount behave well.\n");
+    // print file3.txt
+    char buffer[100];
+    fseek(file3, 0, SEEK_SET);
+    fread(buffer, 1, 100, file3);
+    printf("file3.txt content: %s\n", buffer);
     fclose(file3);
 
     // test umount with flags ( use umount2 )
-    if (umount2("/some/ramfs/some/another/just_another", MNT_DETACH) == -1) {
+    if (umount("/some/ramfs/some/another/just_another") == -1) {
         perror("Failed to umount ramfs at /some/ramfs/some/another/just_another");
         return 1;
     }
 
-    // // Delete files under /some/ramfs and /some/ramfs/some/another
-    // if (unlink("/some/ramfs/file1.txt") == -1) {
-    //     perror("Failed to delete /some/ramfs/file1.txt");
-    //     return 1;
-    // }
-
-    // if (unlink("/some/ramfs/some/another/file2.txt") == -1) {
-    //     perror("Failed to delete /some/ramfs/some/another/file2.txt");
-    //     return 1;
-    // }
-
-    // Remove directories under /some/ramfs and /some/ramfs/some/another
-    // if (rmdir(another_ramfs_path) == -1) {
-    //     perror("Failed to remove directory under /some/ramfs/some/another");
-    //     return 1;
-    // }
-    // if (rmdir(ramfs_path) == -1) {
-    //     perror("Failed to remove directory under /some/ramfs");
-    //     return 1;
-    // }
-
+    // delete just_another
+    if (rmdir("/some/ramfs/some/another/just_another") == -1) {
+        perror("Failed to delete /some/ramfs/some/another/just_another");
+        return 1;
+    }
 
     return 0;
 }

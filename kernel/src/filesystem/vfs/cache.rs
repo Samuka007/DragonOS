@@ -35,7 +35,7 @@ impl<'a> Iterator for SrcIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let mut vec_here = None;
         swap(&mut vec_here, &mut self.vec);
-        // let vec_here = core::mem::take(&mut self.vec);
+
         let mut vec_cur = vec_here.unwrap();
 
         // 自动删除空节点
@@ -128,26 +128,6 @@ impl LruList {
             })
             .count()
     }
-
-    // fn release(&mut self) -> usize {
-    //     kdebug!("Called release.");
-    //     if self.list.is_empty() {
-    //         return 0;
-    //     }
-    //     self.list
-    //         .extract_if(|src| {
-    //             // 原始指针已被销毁
-    //             if src.upgrade().is_none() {
-    //                 return true;
-    //             }
-    //             // 已无外界在使用该文件
-    //             if src.strong_count() < 2 {
-    //                 return true;
-    //             }
-    //             false
-    //         })
-    //         .count()
-    // }
 }
 
 /// Directory Cache 的默认实现
@@ -158,8 +138,6 @@ pub struct DefaultCache<H: Hasher + Default = SipHasher> {
     table: HashTable<H>,
     /// lru note
     deque: SpinLock<LruList>,
-    // /// resource release
-    // source: SpinLock<CacheManager>,
     max_size: AtomicUsize,
     size: AtomicUsize,
 }
@@ -217,14 +195,6 @@ impl<H: Hasher + Default> DefaultCache<H> {
         kdebug!("Clean {} empty entry", ret);
         ret
     }
-
-    // /// 释放未在使用的目录项与清除已删除的目录项（未测试）
-    // pub fn release(&self) -> usize {
-    //     let ret = self.deque.lock().release();
-    //     self.size.fetch_sub(ret, Ordering::Acquire);
-    //     kdebug!("Release {} empty entry", ret);
-    //     ret
-    // }
 }
 
 impl<H: Hasher + Default> core::fmt::Debug for DefaultCache<H> {

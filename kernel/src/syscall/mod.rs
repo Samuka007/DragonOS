@@ -993,7 +993,7 @@ impl Syscall {
                 return Self::mount(source, target, filesystemtype, 0, null());
             }
 
-            SYS_UMOUNT => {
+            SYS_UMOUNT2 => {
                 let target = args[0] as *const u8;
                 let flags = args[1] as i32;
                 Self::umount2(target, flags)?;

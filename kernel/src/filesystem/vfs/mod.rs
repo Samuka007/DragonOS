@@ -510,36 +510,34 @@ impl dyn IndexNode {
             })
             .next()
         {
-            if let Some(fs) = fs.as_any_ref().downcast_ref::<MountFS>() {
-                let root_inode = fs.mountpoint_root_inode().find(".")?;
+            let root_inode: Arc<dyn IndexNode> = fs.root_inode();
 
-                if let Ok(fscache) = fs.cache() {
-                    let path_under = path.strip_prefix(root_path).unwrap();
-                    if path_under.iter().next().is_none() {
-                        return Ok(root_inode);
-                    }
-
-                    // Cache record is found
-                    if let Some((inode, found_path)) =
-                        Self::quick_lookup(fscache, &abs_path, &abs_path, root_path)
-                    {
-                        let rest_path = abs_path.strip_prefix(found_path).unwrap();
-                        // no path left
-                        if rest_path.iter().next().is_none() {
-                            return Ok(inode);
-                        }
-                        return inode.lookup_walk(rest_path, max_follow_times);
-                    }
-
-                    // Cache record not found
-                    return root_inode.lookup_walk(path_under, max_follow_times);
+            if let Ok(fscache) = fs.cache() {
+                let path_under = path.strip_prefix(root_path).unwrap();
+                if path_under.iter().next().is_none() {
+                    return Ok(root_inode);
                 }
 
-                // 在对应文件系统根开始lookup
-                return fs
-                    .root_inode()
-                    ._lookup_follow_symlink(path.as_os_str(), max_follow_times);
+                // Cache record is found
+                if let Some((inode, found_path)) =
+                    Self::quick_lookup(fscache, &abs_path, &abs_path, root_path)
+                {
+                    // kdebug!("Cache is found!");
+                    let rest_path = abs_path.strip_prefix(found_path).unwrap();
+                    // no path left
+                    if rest_path.iter().next().is_none() {
+                        return Ok(inode);
+                    }
+                    return inode.lookup_walk(rest_path, max_follow_times);
+                }
+
+                // Cache record not found
+                return root_inode.lookup_walk(path_under, max_follow_times);
             }
+            // 在对应文件系统根开始lookup
+            return fs
+                .root_inode()
+                ._lookup_follow_symlink(path.as_os_str(), max_follow_times);
         }
 
         // Exception Normal lookup, for non-cache fs
@@ -687,7 +685,7 @@ impl dyn IndexNode {
         let key = abs_path.file_name();
 
         let result = cache.get(key.unwrap()).find(|src| {
-            // kdebug!("Src: {:?}, {:?}; Lookup: {:?}, {:?}", src.key(), src._abs_path(), key, abs_path);
+            // kdebug!("Src: {:?}, {:?}; Lookup: {:?}, {:?}", src.key(), src.abs_path(), key, abs_path);
             src.abs_path().unwrap() == abs_path
         });
 

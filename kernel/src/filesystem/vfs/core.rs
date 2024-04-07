@@ -286,10 +286,18 @@ pub fn do_unlink_at(dirfd: i32, path: &Path) -> Result<u64, SystemError> {
 }
 
 // @brief mount filesystem
-pub fn do_mount(fs: Arc<dyn FileSystem>, mount_point: &Path) -> Result<usize, SystemError> {
-    ROOT_INODE()
-        .lookup_follow_symlink(mount_point, VFS_MAX_FOLLOW_SYMLINK_TIMES)?
-        .mount(fs.clone())?;
+pub fn do_mount(dirfd: i32, fs: Arc<dyn FileSystem>, mut mount_point: PathBuf) -> Result<usize, SystemError> {
+    if mount_point.is_relative() {
+        let (work, rest) = user_path_at(&ProcessManager::current_pcb(), dirfd, &mount_point)?;
+        mount_point = work.abs_path()?.join(rest);
+    }
+    let mnt_point = ROOT_INODE().lookup_follow_symlink(&mount_point, VFS_MAX_FOLLOW_SYMLINK_TIMES)?;
+    let mnt_fs = mnt_point.mount(fs.clone())?;
+    // kdebug!("{:?}", mnt_point.abs_path()?);
+    MOUNTS_LIST().write().insert(
+        MountPath::from(mnt_point.abs_path()?),
+        mnt_fs,
+    );
     Ok(0)
 }
 
@@ -305,14 +313,16 @@ pub fn do_umount2(dirfd: i32, mut target: PathBuf, flag: UmountFlag) -> Result<(
 
     let do_umount = || -> Result<(), SystemError> {
         let umount_path = MountPath::from(target);
-        if MOUNTS_LIST().read().contains_key(&umount_path) {
-            kdebug!("Umount Target found!");
-            // check fd
-            // check 
-            unimplemented!();
+        // kdebug!("Removing {umount_path:?}");
+        // kdebug!("Items in Mount lists: {:?}", MOUNTS_LIST().read().keys().collect::<Vec<_>>());
+        if let Some(mnt_fs) = MOUNTS_LIST().write().remove(&umount_path) {
+            // Todo: 占用检测
+            // kdebug!("Umount Target found!");
+            return mnt_fs.as_any_ref().downcast_ref::<MountFS>().unwrap().umount();
         }
         return Err(SystemError::EINVAL);
     };
+
     return match flag {
         UmountFlag::DEFAULT => {
             do_umount()

@@ -74,7 +74,7 @@
 #define SYS_ARCH_PRCTL 158
 
 #define SYS_MOUNT 165
-#define SYS_UMOUNT 166
+#define SYS_UMOUNT2 166
 
 #define SYS_REBOOT 169
 

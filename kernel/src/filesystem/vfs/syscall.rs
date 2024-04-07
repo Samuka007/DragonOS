@@ -1540,13 +1540,13 @@ impl Syscall {
         _mountflags: usize,
         _data: *const c_void,
     ) -> Result<usize, SystemError> {
-        let target = user_access::check_and_clone_cstr(target, Some(MAX_PATHLEN))?;
+        let target = PathBuf::from(user_access::check_and_clone_cstr(target, Some(MAX_PATHLEN))?);
 
         let filesystemtype = user_access::check_and_clone_cstr(filesystemtype, Some(MAX_PATHLEN))?;
 
         let filesystemtype = producefs!(FSMAKER, filesystemtype)?;
 
-        return Vcore::do_mount(filesystemtype, Path::new(&target));
+        return Vcore::do_mount(AtFlags::AT_FDCWD.bits(), filesystemtype, target);
     }
 
     // 想法：可以在VFS中实现一个文件系统分发器，流程如下：

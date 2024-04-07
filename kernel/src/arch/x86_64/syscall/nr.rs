@@ -165,7 +165,6 @@ pub const SYS_MLOCKALL: usize = 151;
 pub const SYS_MMAP: usize = 9;
 pub const SYS_MODIFY_LDT: usize = 154;
 pub const SYS_MOUNT: usize = 165;
-pub const SYS_UMOUNT: usize = 166;
 pub const SYS_MOUNT_SETATTR: usize = 442;
 pub const SYS_MOVE_MOUNT: usize = 429;
 pub const SYS_MOVE_PAGES: usize = 279;
