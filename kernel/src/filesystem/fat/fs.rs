@@ -15,7 +15,7 @@ use crate::ipc::pipe::LockedPipeInode;
 use crate::{
     driver::base::block::{block_device::LBA_SIZE, disk_info::Partition, SeekFrom},
     filesystem::vfs::{
-        cache::DefaultCache,
+        cache::DefaultDCache,
         core::generate_inode_id,
         file::{FileMode, FilePrivateData},
         syscall::ModeType,
@@ -78,7 +78,7 @@ pub struct FATFileSystem {
     /// 文件系统的根inode
     root_inode: Arc<LockedFATInode>,
     /// 文件系统目录索引缓存
-    index_cache: Arc<DefaultCache>,
+    index_cache: Arc<DefaultDCache>,
 }
 
 /// FAT文件系统的Inode
@@ -270,7 +270,7 @@ impl FileSystem for FATFileSystem {
         )
     }
 
-    fn cache(&self) -> Result<Arc<DefaultCache>, SystemError> {
+    fn dcache(&self) -> Result<Arc<DefaultDCache>, SystemError> {
         Ok(self.index_cache.clone())
     }
 }
@@ -357,7 +357,7 @@ impl FATFileSystem {
             first_data_sector,
             fs_info: Arc::new(LockedFATFsInfo::new(fs_info)),
             root_inode,
-            index_cache: Arc::new(DefaultCache::new(None)),
+            index_cache: Arc::new(DefaultDCache::new(None)),
         });
 
         // 对root inode加锁，并继续完成初始化工作
@@ -1381,7 +1381,7 @@ impl IndexNode for LockedFATInode {
         offset: usize,
         len: usize,
         buf: &mut [u8],
-        _data: &mut FilePrivateData,
+        _data: SpinLockGuard<FilePrivateData>,
     ) -> Result<usize, SystemError> {
         let mut guard: SpinLockGuard<FATInode> = self.0.lock();
         match &guard.inode_type {
@@ -1409,7 +1409,7 @@ impl IndexNode for LockedFATInode {
         offset: usize,
         len: usize,
         buf: &[u8],
-        _data: &mut FilePrivateData,
+        _data: SpinLockGuard<FilePrivateData>,
     ) -> Result<usize, SystemError> {
         let mut guard: SpinLockGuard<FATInode> = self.0.lock();
         let fs: &Arc<FATFileSystem> = &guard.fs.upgrade().unwrap();
@@ -1578,11 +1578,15 @@ impl IndexNode for LockedFATInode {
         return Ok(target);
     }
 
-    fn open(&self, _data: &mut FilePrivateData, _mode: &FileMode) -> Result<(), SystemError> {
+    fn open(
+        &self,
+        _data: SpinLockGuard<FilePrivateData>,
+        _mode: &FileMode,
+    ) -> Result<(), SystemError> {
         return Ok(());
     }
 
-    fn close(&self, _data: &mut FilePrivateData) -> Result<(), SystemError> {
+    fn close(&self, _data: SpinLockGuard<FilePrivateData>) -> Result<(), SystemError> {
         return Ok(());
     }
 

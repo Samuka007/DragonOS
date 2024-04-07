@@ -1,7 +1,4 @@
-use core::{
-    any::Any,
-    // sync::atomic::{compiler_fence, Ordering},
-};
+use core::any::Any;
 
 use alloc::{
     collections::BTreeMap,
@@ -13,7 +10,10 @@ use system_error::SystemError;
 
 use crate::{
     driver::base::device::device_number::DeviceNumber,
-    libs::{rwlock::RwLock, spinlock::SpinLock},
+    libs::{
+        rwlock::RwLock,
+        spinlock::{SpinLock, SpinLockGuard},
+    },
 };
 
 use super::{
@@ -36,10 +36,9 @@ impl From<&str> for MountPath {
 
 impl From<PathBuf> for MountPath {
     fn from(value: PathBuf) -> Self {
-        Self(value)
+        Self(value.clean())
     }
 }
-
 
 impl AsRef<Path> for MountPath {
     fn as_ref(&self) -> &Path {
@@ -65,23 +64,34 @@ impl Ord for MountPath {
     }
 }
 
-/// 返回MOUNT LIST
+/// # 获取挂载点的列表
 #[inline(always)]
 #[allow(non_snake_case)]
-pub fn MOUNTS_LIST() -> MountListType {
+pub fn MOUNT_LIST() -> MountListType {
     unsafe {
-        if __MOUNTS_LIST.is_none() {
-            __MOUNTS_LIST = Some(Arc::new(RwLock::new(BTreeMap::new())));
-        }
         return __MOUNTS_LIST.as_ref().unwrap().clone();
     }
 }
 
+/// # 初始化挂载点列表
+///
+/// 在VFS初始化时调用
 #[inline(always)]
 #[allow(non_snake_case)]
-pub fn CLEAR_MOUNTS_LIST() {
+pub(super) fn INIT_MOUNT_LIST() {
     unsafe {
-        __MOUNTS_LIST = None;
+        __MOUNTS_LIST = Some(Arc::new(RwLock::new(BTreeMap::new())));
+    }
+}
+
+/// # 清空挂载点列表
+///
+/// 用于迁移文件系统时清空挂载点列表
+#[inline(always)]
+#[allow(non_snake_case)]
+pub(super) fn CLEAR_MOUNTS_LIST() {
+    unsafe {
+        __MOUNTS_LIST = Some(Arc::new(RwLock::new(BTreeMap::new())));
     }
 }
 
@@ -103,6 +113,7 @@ pub struct MountFS {
 
 /// @brief MountFS的Index Node 注意，这个IndexNode只是一个中间层。它的目的是将具体文件系统的Inode与挂载机制连接在一起。
 #[derive(Debug)]
+#[cast_to([sync] IndexNode)]
 pub struct MountFSInode {
     /// 当前挂载点对应到具体的文件系统的Inode
     inner_inode: Arc<dyn IndexNode>,
@@ -138,6 +149,10 @@ impl MountFS {
         return self.inner_filesystem.clone();
     }
 
+    pub fn self_ref(&self) -> Arc<Self> {
+        self.self_ref.upgrade().unwrap()
+    }
+
     pub fn umount(&self) -> Result<(), SystemError> {
         if let Some(parent) = &self.self_mountpoint {
             return parent.umount();
@@ -159,7 +174,7 @@ impl MountFSInode {
     /// 如果当前inode在父MountFS内，但不是挂载点，那么说明在这里不需要进行inode替换，因此直接返回当前inode。
     ///
     /// @return Arc<MountFSInode>
-    pub fn overlaid_inode(&self) -> Arc<MountFSInode> {
+    fn overlaid_inode(&self) -> Arc<MountFSInode> {
         let inode_id = self.metadata().unwrap().inode_id;
 
         if let Some(sub_mountfs) = self.mount_fs.mountpoints.lock().get(&inode_id) {
@@ -169,14 +184,32 @@ impl MountFSInode {
         }
     }
 
+    /// 将新的挂载点-挂载文件系统添加到父级的挂载树
+    pub(super) fn do_mount(
+        &self,
+        inode_id: InodeId,
+        new_mount_fs: Arc<MountFS>,
+    ) -> Result<(), SystemError> {
+        let mut guard = self.mount_fs.mountpoints.lock();
+        if guard.contains_key(&inode_id) {
+            return Err(SystemError::EBUSY);
+        }
+        guard.insert(inode_id, new_mount_fs);
+
+        return Ok(());
+    }
+
+    pub(super) fn inode_id(&self) -> InodeId {
+        self.metadata().map(|x| x.inode_id).unwrap()
+    }
+
     fn umount(&self) -> Result<(), SystemError> {
         // 移除挂载点
         // 不加检查或许可能导致未定义行为
         // if metadata.file_type != FileType::Dir {
         //     return Err(SystemError::ENOTDIR);
         // }
-        self
-            .mount_fs
+        self.mount_fs
             .mountpoints
             .lock()
             .remove(&self.inner_inode.metadata()?.inode_id);
@@ -185,11 +218,15 @@ impl MountFSInode {
 }
 
 impl IndexNode for MountFSInode {
-    fn open(&self, data: &mut FilePrivateData, mode: &FileMode) -> Result<(), SystemError> {
+    fn open(
+        &self,
+        data: SpinLockGuard<FilePrivateData>,
+        mode: &FileMode,
+    ) -> Result<(), SystemError> {
         return self.inner_inode.open(data, mode);
     }
 
-    fn close(&self, data: &mut FilePrivateData) -> Result<(), SystemError> {
+    fn close(&self, data: SpinLockGuard<FilePrivateData>) -> Result<(), SystemError> {
         return self.inner_inode.close(data);
     }
 
@@ -201,8 +238,8 @@ impl IndexNode for MountFSInode {
         data: usize,
     ) -> Result<Arc<dyn IndexNode>, SystemError> {
         let inner_inode = self
-                .inner_inode
-                .create_with_data(name, file_type, mode, data)?;
+            .inner_inode
+            .create_with_data(name, file_type, mode, data)?;
         return Ok(Arc::new_cyclic(|me| MountFSInode {
             inner_inode,
             mount_fs: self.mount_fs.clone(),
@@ -219,7 +256,7 @@ impl IndexNode for MountFSInode {
         offset: usize,
         len: usize,
         buf: &mut [u8],
-        data: &mut FilePrivateData,
+        data: SpinLockGuard<FilePrivateData>,
     ) -> Result<usize, SystemError> {
         return self.inner_inode.read_at(offset, len, buf, data);
     }
@@ -229,7 +266,7 @@ impl IndexNode for MountFSInode {
         offset: usize,
         len: usize,
         buf: &[u8],
-        data: &mut FilePrivateData,
+        data: SpinLockGuard<FilePrivateData>,
     ) -> Result<usize, SystemError> {
         return self.inner_inode.write_at(offset, len, buf, data);
     }
@@ -396,11 +433,14 @@ impl IndexNode for MountFSInode {
 
         // 为新的挂载点创建挂载文件系统
         let new_mount_fs: Arc<MountFS> = MountFS::new(fs, Some(self.self_ref.upgrade().unwrap()));
-        // 将新的挂载点-挂载文件系统添加到父级的挂载树
-        self.mount_fs
-            .mountpoints
-            .lock()
-            .insert(metadata.inode_id, new_mount_fs.clone());
+        self.do_mount(metadata.inode_id, new_mount_fs.clone())?;
+
+        // 挂载点记录暂时不记录不支持dcache（不支持key与parent方法）的文件系统
+        if self.fs().dcache().is_ok() {
+            MOUNT_LIST()
+                .write()
+                .insert(MountPath::from(self.abs_path()?), new_mount_fs.clone());
+        }
 
         return Ok(new_mount_fs);
     }
@@ -484,7 +524,7 @@ impl FileSystem for MountFS {
         SuperBlock::new(Magic::MOUNT_MAGIC, MOUNTFS_BLOCK_SIZE, MOUNTFS_MAX_NAMELEN)
     }
 
-    fn cache(&self) -> Result<Arc<super::cache::DefaultCache>, SystemError> {
-        self.inner_filesystem.cache()
+    fn dcache(&self) -> Result<Arc<super::cache::DefaultDCache>, SystemError> {
+        self.inner_filesystem.dcache()
     }
 }

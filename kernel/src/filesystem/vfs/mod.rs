@@ -9,6 +9,7 @@ mod utils;
 
 use ::core::{any::Any, fmt::Debug, sync::atomic::AtomicUsize};
 use alloc::{string::String, sync::Arc, vec::Vec};
+use intertrait::CastFromSync;
 use path_base::{clean_path::Clean, Path, PathBuf};
 use system_error::SystemError;
 
@@ -16,13 +17,16 @@ use crate::{
     driver::base::{
         block::block_device::BlockDevice, char::CharDevice, device::device_number::DeviceNumber,
     },
-    filesystem::vfs::mount::MOUNTS_LIST,
+    filesystem::vfs::mount::MOUNT_LIST,
     ipc::pipe::LockedPipeInode,
-    libs::casting::DowncastArc,
+    libs::{
+        casting::DowncastArc,
+        spinlock::{SpinLock, SpinLockGuard},
+    },
     time::TimeSpec,
 };
 
-use self::{cache::DefaultCache, core::generate_inode_id, file::FileMode, syscall::ModeType};
+use self::{cache::DefaultDCache, core::generate_inode_id, file::FileMode, syscall::ModeType};
 pub use self::{core::ROOT_INODE, file::FilePrivateData, mount::MountFS};
 
 /// vfs容许的最大的路径名称长度
@@ -117,12 +121,16 @@ bitflags! {
     }
 }
 
-pub trait IndexNode: Any + Sync + Send + Debug {
+pub trait IndexNode: Any + Sync + Send + Debug + CastFromSync {
     /// @brief 打开文件
     ///
     /// @return 成功：Ok()
     ///         失败：Err(错误码)
-    fn open(&self, _data: &mut FilePrivateData, _mode: &FileMode) -> Result<(), SystemError> {
+    fn open(
+        &self,
+        _data: SpinLockGuard<FilePrivateData>,
+        _mode: &FileMode,
+    ) -> Result<(), SystemError> {
         // 若文件系统没有实现此方法，则返回“不支持”
         return Err(SystemError::EOPNOTSUPP_OR_ENOTSUP);
     }
@@ -131,7 +139,7 @@ pub trait IndexNode: Any + Sync + Send + Debug {
     ///
     /// @return 成功：Ok()
     ///         失败：Err(错误码)
-    fn close(&self, _data: &mut FilePrivateData) -> Result<(), SystemError> {
+    fn close(&self, _data: SpinLockGuard<FilePrivateData>) -> Result<(), SystemError> {
         // 若文件系统没有实现此方法，则返回“不支持”
         return Err(SystemError::EOPNOTSUPP_OR_ENOTSUP);
     }
@@ -150,7 +158,7 @@ pub trait IndexNode: Any + Sync + Send + Debug {
         offset: usize,
         len: usize,
         buf: &mut [u8],
-        _data: &mut FilePrivateData,
+        _data: SpinLockGuard<FilePrivateData>,
     ) -> Result<usize, SystemError>;
 
     /// @brief 在inode的指定偏移量开始，写入指定大小的数据（从buf的第0byte开始写入）
@@ -167,7 +175,7 @@ pub trait IndexNode: Any + Sync + Send + Debug {
         offset: usize,
         len: usize,
         buf: &[u8],
-        _data: &mut FilePrivateData,
+        _data: SpinLockGuard<FilePrivateData>,
     ) -> Result<usize, SystemError>;
 
     /// @brief 获取当前inode的状态。
@@ -466,30 +474,35 @@ impl dyn IndexNode {
         return self.as_any_ref().downcast_ref::<T>();
     }
 
-    /// @brief 查找文件（不考虑符号链接）
-    ///
-    /// @param path 文件路径
-    ///
-    /// @return Ok(Arc<dyn IndexNode>) 要寻找的目录项的inode
-    /// @return Err(SystemError) 错误码
+    /// # lookup
+    /// 查找文件
+    /// ## 参数
+    /// - path: 路径
+    /// ## 返回值
+    /// - Ok(Arc\<dyn IndexNode\>): 找到的节点
+    /// - Err(SystemError::ENOENT): 未找到
+    /// - Err(SystemError::ENOTDIR): 不是目录
     pub fn lookup(&self, path: &Path) -> Result<Arc<dyn IndexNode>, SystemError> {
         self.lookup_follow_symlink(path, 0)
     }
 
-    /// @brief 查找文件（考虑符号链接）
-    ///
-    /// @param path 文件路径
-    /// @param max_follow_times 最大经过的符号链接的大小
-    ///
-    /// @return Ok(Arc<dyn IndexNode>) 要寻找的目录项的inode
-    /// @return Err(SystemError) 错误码
-    pub fn lookup_follow_symlink(
+    /// # lookup_follow_symlink
+    /// 查找文件（考虑符号链接）
+    /// ## 参数
+    /// - path: 路径
+    /// - max_follow_times: 最大跟随次数
+    /// ## 返回值
+    /// - Ok(Arc\<dyn IndexNode\>): 找到的节点
+    /// - Err(SystemError::ENOENT): 未找到
+    /// - Err(SystemError::ENOTDIR): 不是目录
+    pub fn lookup_follow_symlink<T: AsRef<Path>>(
         &self,
-        path: &Path,
+        path_any: T,
         max_follow_times: usize,
     ) -> Result<Arc<dyn IndexNode>, SystemError> {
         // kdebug!("Looking for path {:?}", path);
         // 拼接绝对路径
+        let path = path_any.as_ref();
         let abs_path = if path.is_absolute() {
             path.clean()
         } else {
@@ -497,7 +510,7 @@ impl dyn IndexNode {
         };
 
         // 检查根目录缓存
-        if let Some((root_path, fs)) = MOUNTS_LIST()
+        if let Some((root_path, fs)) = MOUNT_LIST()
             .read()
             .iter()
             .filter_map(|(key, value)| {
@@ -512,7 +525,7 @@ impl dyn IndexNode {
         {
             let root_inode: Arc<dyn IndexNode> = fs.root_inode();
 
-            if let Ok(fscache) = fs.cache() {
+            if let Ok(fscache) = fs.dcache() {
                 let path_under = path.strip_prefix(root_path).unwrap();
                 if path_under.iter().next().is_none() {
                     return Ok(root_inode);
@@ -545,6 +558,15 @@ impl dyn IndexNode {
         return self._lookup_follow_symlink(path.as_os_str(), max_follow_times);
     }
 
+    /// # 无dcache的lookup方法
+    /// 旧有的跟随lookup方法，不使用dcache
+    /// ## 参数
+    /// - path: 路径
+    /// - max_follow_times: 最大跟随次数
+    /// ## 返回值
+    /// - Ok(Arc\<dyn IndexNode\>): 找到的节点
+    /// - Err(SystemError::ENOENT): 未找到
+    /// - Err(SystemError::ENOTDIR): 不是目录
     fn _lookup_follow_symlink(
         &self,
         path: &str,
@@ -598,7 +620,12 @@ impl dyn IndexNode {
             if inode.metadata()?.file_type == FileType::SymLink && max_follow_times > 0 {
                 let mut content = [0u8; 256];
                 // 读取符号链接
-                let len = inode.read_at(0, 256, &mut content, &mut FilePrivateData::Unused)?;
+                let len = inode.read_at(
+                    0,
+                    256,
+                    &mut content,
+                    SpinLock::new(FilePrivateData::Unused).lock(),
+                )?;
 
                 // 将读到的数据转换为utf8字符串（先转为str，再转为String）
                 let link_path = String::from(
@@ -615,6 +642,14 @@ impl dyn IndexNode {
         Ok(result)
     }
 
+    /// # lookup_walk
+    /// 退化到文件系统中递归查找文件，并将找到的目录项缓存到dcache中
+    /// ## 参数
+    /// - rest_path: 剩余路径
+    /// - max_follow_times: 最大跟随次数
+    /// ## 返回值
+    /// - Ok(Arc\<dyn IndexNode\>): 找到的节点
+    /// - Err(SystemError::ENOENT): 未找到
     fn lookup_walk(
         &self,
         rest_path: &Path,
@@ -631,13 +666,13 @@ impl dyn IndexNode {
                 if child_node.metadata()?.file_type == FileType::SymLink && max_follow_times > 0 {
                     // symlink wrapping problem
                     return ROOT_INODE().lookup_follow_symlink(
-                        &child_node.convert_symlink()?.join(rest_path),
+                        child_node.convert_symlink()?.join(rest_path),
                         max_follow_times - 1,
                     );
                 }
 
                 // 潜在优化可能：重复的文件系统缓存获取
-                if let Ok(cache) = self.fs().cache() {
+                if let Ok(cache) = self.fs().dcache() {
                     // kdebug!("Calling cache put with child {}", child);
                     cache.put(child, child_node.clone());
                 }
@@ -658,25 +693,36 @@ impl dyn IndexNode {
         }
     }
 
+    /// # convert_symlink
+    /// 将符号链接转换为路径
+    /// ## 返回值
+    /// - Ok(PathBuf): 转换后的路径
     fn convert_symlink(&self) -> Result<PathBuf, SystemError> {
         let mut content = [0u8; 256];
-        let len = self.read_at(0, 256, &mut content, &mut FilePrivateData::Unused)?;
+        let len = self.read_at(
+            0,
+            256,
+            &mut content,
+            SpinLock::new(FilePrivateData::Unused).lock(),
+        )?;
 
         return Ok(PathBuf::from(
             ::core::str::from_utf8(&content[..len]).map_err(|_| SystemError::ENOTDIR)?,
         ));
     }
 
-    /// @brief 缓存查询
-    ///
-    /// @param path 文件路径
-    /// @return Ok((Arc<dyn IndexNode>, &str))
-    /// 要寻找的目录项路径上最长已缓存的inode 与 该inode的绝对路径
-    /// @return Err(SystemError) 错误码
-    ///
-    /// 缓存可能未命中
+    /// # quick_lookup
+    /// 在dcache中快速查找目录项
+    /// ## 参数
+    /// - cache: 缓存
+    /// - abs_path: 绝对路径
+    /// - rest_path: 剩余路径
+    /// - stop_path: 停止路径
+    /// ## 返回值
+    /// - Option<(Arc\<dyn IndexNode\>, &Path)>: 找到的最近节点与剩余路径
+    /// - None: 未找到
     fn quick_lookup<'a>(
-        cache: Arc<DefaultCache>,
+        cache: Arc<DefaultDCache>,
         abs_path: &'a Path,
         rest_path: &'a Path,
         stop_path: &'a Path,
@@ -844,9 +890,10 @@ pub trait FileSystem: Any + Sync + Send + Debug {
 
     fn super_block(&self) -> SuperBlock;
 
-    fn cache(&self) -> Result<Arc<DefaultCache>, SystemError> {
+    /// @brief 获取目录项缓存
+    fn dcache(&self) -> Result<Arc<DefaultDCache>, SystemError> {
         // 若文件系统没有实现此方法，则返回“不支持”
-        return Err(SystemError::EOPNOTSUPP_OR_ENOTSUP);
+        return Err(SystemError::ENOSYS);
     }
 }
 

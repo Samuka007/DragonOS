@@ -7,23 +7,19 @@ use system_error::SystemError;
 use crate::{
     driver::{base::block::disk_info::Partition, disk::ahci},
     filesystem::{
-        devfs::devfs_init,
-        fat::fs::FATFileSystem,
-        procfs::procfs_init,
-        ramfs::RamFS,
+        devfs::devfs_init, fat::fs::FATFileSystem, procfs::procfs_init, ramfs::RamFS,
         sysfs::sysfs_init,
-        vfs::{
-            mount::{MountFS, MountPath, CLEAR_MOUNTS_LIST, MOUNTS_LIST},
-            syscall::ModeType,
-            AtomicInodeId, FileSystem, FileType,
-        },
     },
     kdebug, kerror, kinfo,
     process::ProcessManager,
 };
 
 use super::{
-    file::FileMode, syscall::UmountFlag, utils::user_path_at, IndexNode, InodeId, VFS_MAX_FOLLOW_SYMLINK_TIMES
+    file::FileMode,
+    mount::*,
+    syscall::{ModeType, UmountFlag},
+    utils::user_path_at,
+    AtomicInodeId, FileSystem, FileType, IndexNode, InodeId, VFS_MAX_FOLLOW_SYMLINK_TIMES,
 };
 
 /// @brief 原子地生成新的Inode号。
@@ -53,6 +49,7 @@ pub fn vfs_init() -> Result<(), SystemError> {
     // 使用Ramfs作为默认的根文件系统
     let ramfs = RamFS::new();
     let mount_fs = MountFS::new(ramfs, None);
+    INIT_MOUNT_LIST();
     let root_inode = mount_fs.root_inode();
 
     unsafe {
@@ -88,7 +85,7 @@ pub fn vfs_init() -> Result<(), SystemError> {
 ///
 /// @param mountpoint_name 在根目录下的挂载点的名称
 /// @param inode 原本的挂载点的inode
-pub fn do_migrate(
+fn do_migrate(
     new_root_inode: Arc<dyn IndexNode>,
     mountpoint_name: &str,
     fs: &MountFS,
@@ -106,9 +103,9 @@ pub fn do_migrate(
             .unwrap_or_else(|_| panic!("Failed to create '/{mountpoint_name}' in migrating"))
     };
     // 迁移挂载点
-    mountpoint
-        .mount(fs.inner_filesystem())
-        .unwrap_or_else(|_| panic!("Failed to migrate {mountpoint_name} "));
+    let inode = mountpoint.arc_any().downcast::<MountFSInode>().unwrap();
+    inode.do_mount(inode.inode_id(), fs.self_ref())?;
+
     return Ok(());
 }
 
@@ -144,7 +141,7 @@ fn migrate_virtual_filesystem(new_fs: Arc<dyn FileSystem>) -> Result<(), SystemE
         drop(old_root_inode);
     }
 
-    MOUNTS_LIST()
+    MOUNT_LIST()
         .write()
         .insert(MountPath::from("/"), ROOT_INODE().fs());
     kinfo!("VFS: Migrate filesystems done!");
@@ -286,21 +283,24 @@ pub fn do_unlink_at(dirfd: i32, path: &Path) -> Result<u64, SystemError> {
 }
 
 // @brief mount filesystem
-pub fn do_mount(dirfd: i32, fs: Arc<dyn FileSystem>, mut mount_point: PathBuf) -> Result<usize, SystemError> {
+pub fn do_mount(
+    dirfd: i32,
+    fs: Arc<dyn FileSystem>,
+    mut mount_point: PathBuf,
+) -> Result<usize, SystemError> {
     if mount_point.is_relative() {
         let (work, rest) = user_path_at(&ProcessManager::current_pcb(), dirfd, &mount_point)?;
         mount_point = work.abs_path()?.join(rest);
     }
-    let mnt_point = ROOT_INODE().lookup_follow_symlink(&mount_point, VFS_MAX_FOLLOW_SYMLINK_TIMES)?;
+    let mnt_point =
+        ROOT_INODE().lookup_follow_symlink(&mount_point, VFS_MAX_FOLLOW_SYMLINK_TIMES)?;
     let mnt_fs = mnt_point.mount(fs.clone())?;
     // kdebug!("{:?}", mnt_point.abs_path()?);
-    MOUNTS_LIST().write().insert(
-        MountPath::from(mnt_point.abs_path()?),
-        mnt_fs,
-    );
+    MOUNT_LIST()
+        .write()
+        .insert(MountPath::from(mnt_point.abs_path()?), mnt_fs);
     Ok(0)
 }
-
 
 pub fn do_umount2(dirfd: i32, mut target: PathBuf, flag: UmountFlag) -> Result<(), SystemError> {
     // Todo: Check permission
@@ -315,32 +315,24 @@ pub fn do_umount2(dirfd: i32, mut target: PathBuf, flag: UmountFlag) -> Result<(
         let umount_path = MountPath::from(target);
         // kdebug!("Removing {umount_path:?}");
         // kdebug!("Items in Mount lists: {:?}", MOUNTS_LIST().read().keys().collect::<Vec<_>>());
-        if let Some(mnt_fs) = MOUNTS_LIST().write().remove(&umount_path) {
+        if let Some(mnt_fs) = MOUNT_LIST().write().remove(&umount_path) {
             // Todo: 占用检测
             // kdebug!("Umount Target found!");
-            return mnt_fs.as_any_ref().downcast_ref::<MountFS>().unwrap().umount();
+            return mnt_fs
+                .as_any_ref()
+                .downcast_ref::<MountFS>()
+                .unwrap()
+                .umount();
         }
         return Err(SystemError::EINVAL);
     };
 
     return match flag {
-        UmountFlag::DEFAULT => {
-            do_umount()
-        },
-        UmountFlag::MNT_FORCE => {
-            Err(SystemError::ENOSYS)
-        },
-        UmountFlag::MNT_DETACH => {
-            Err(SystemError::ENOSYS)
-        },
-        UmountFlag::MNT_EXPIRE => {
-            Err(SystemError::ENOSYS)
-        },
-        UmountFlag::UMOUNT_NOFOLLOW => {
-            do_umount()
-        },
-        _ => {
-            Err(SystemError::EINVAL)
-        }
+        UmountFlag::DEFAULT => do_umount(),
+        UmountFlag::MNT_FORCE => Err(SystemError::ENOSYS),
+        UmountFlag::MNT_DETACH => Err(SystemError::ENOSYS),
+        UmountFlag::MNT_EXPIRE => Err(SystemError::ENOSYS),
+        UmountFlag::UMOUNT_NOFOLLOW => do_umount(),
+        _ => Err(SystemError::EINVAL),
     };
 }
