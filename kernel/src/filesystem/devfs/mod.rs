@@ -353,8 +353,8 @@ impl LockedDevFSInode {
         }
 
         // 创建inode
-        let result: Arc<LockedDevFSInode> = Arc::new_cyclic(
-            |self_ref| LockedDevFSInode(SpinLock::new(DevFSInode {
+        let result: Arc<LockedDevFSInode> = Arc::new_cyclic(|self_ref| {
+            LockedDevFSInode(SpinLock::new(DevFSInode {
                 parent: guard.self_ref.clone(),
                 self_ref: self_ref.clone(),
                 children: BTreeMap::new(),
@@ -375,8 +375,8 @@ impl LockedDevFSInode {
                     raw_dev: DeviceNumber::from(data as u32),
                 },
                 fs: guard.fs.clone(),
-            }
-        )));
+            }))
+        });
 
         // 将子inode插入父inode的B树中
         guard.children.insert(String::from(name), result.clone());

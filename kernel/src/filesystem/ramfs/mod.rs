@@ -23,11 +23,8 @@ use crate::{
 };
 
 use super::vfs::{
-    core::generate_inode_id,
-    file::FilePrivateData,
-    syscall::ModeType,
-    FileSystem, FileSystemMaker, FileType, FsInfo, IndexNode, Magic, Metadata, SpecialNodeData,
-    SuperBlock, FSMAKER,
+    core::generate_inode_id, file::FilePrivateData, syscall::ModeType, FileSystem, FileSystemMaker,
+    FileType, FsInfo, IndexNode, Magic, Metadata, SpecialNodeData, SuperBlock, FSMAKER,
 };
 
 use self::utils::Keyer;

@@ -24,15 +24,11 @@ use crate::{
     time::PosixTimeSpec,
 };
 
-use self::{
-    core::generate_inode_id,
-    file::FileMode,
-    syscall::ModeType,
-};
+use self::{core::generate_inode_id, file::FileMode, syscall::ModeType};
 pub use self::{
     core::ROOT_INODE,
     file::FilePrivateData,
-    mount::{utils::MountList, MountFS, dcache::DCache},
+    mount::{dcache::DCache, utils::MountList, MountFS},
 };
 
 /// vfs容许的最大的路径名称长度
@@ -434,7 +430,7 @@ pub trait IndexNode: Any + Sync + Send + Debug + CastFromSync {
     }
 
     /// 获取目录名
-    /// 
+    ///
     /// 应由持久化储存的文件系统实现，以下文件系统应实现
     /// - fat
     fn entry_name(&self) -> Result<String, SystemError> {
@@ -491,7 +487,7 @@ impl dyn IndexNode {
         // 检查根目录缓存
         if let Some((root_path, path_under, fs)) = MountList::get(&abs_path) {
             let root_inode = fs.mountpoint_root_inode();
-            
+
             if path_under.iter().next().is_none() {
                 return Ok(root_inode);
             }

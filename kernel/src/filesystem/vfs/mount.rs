@@ -1,5 +1,5 @@
-pub mod utils;
 pub mod dcache;
+pub mod utils;
 
 use core::{
     any::Any,
@@ -19,11 +19,16 @@ use system_error::SystemError;
 
 use crate::{
     driver::base::device::device_number::DeviceNumber,
-    libs::{rwlock::RwLock, spinlock::{SpinLock, SpinLockGuard}, casting::DowncastArc},
+    libs::{
+        casting::DowncastArc,
+        rwlock::RwLock,
+        spinlock::{SpinLock, SpinLockGuard},
+    },
 };
 
 use super::{
-    file::FileMode, syscall::ModeType, utils::Key, DCache, FilePrivateData, FileSystem, FileType, IndexNode, InodeId, Magic, SuperBlock, ROOT_INODE
+    file::FileMode, syscall::ModeType, utils::Key, DCache, FilePrivateData, FileSystem, FileType,
+    IndexNode, InodeId, Magic, SuperBlock, ROOT_INODE,
 };
 
 use self::utils::{MountList, MountNameCmp};
@@ -76,28 +81,26 @@ impl MountFS {
         inner_fs: Arc<dyn FileSystem>,
         self_mountpoint: Option<Arc<MountFSInode>>,
     ) -> Arc<Self> {
-        let mut ret = Arc::new_cyclic(|fs_ref|
-            MountFS {
-                inner_filesystem: inner_fs.clone(),
-                mountpoints: SpinLock::new(BTreeMap::new()),
-                self_mountpoint,
-                self_ref: fs_ref.clone(),
-                self_root_inode: Weak::new(),
-                dcache: DCache::new(),
-            }
-        );
-        let root = Arc::new_cyclic( |node_self| {
-            MountFSInode {
-                inner_inode: inner_fs.root_inode(),
-                mount_fs: ret.clone(),
-                self_ref: node_self.clone(),
-                name: Arc::default(),
-                parent: Weak::new(),
-                children: Arc::new(RwLock::new(HashSet::new())),
-            }
+        let mut ret = Arc::new_cyclic(|fs_ref| MountFS {
+            inner_filesystem: inner_fs.clone(),
+            mountpoints: SpinLock::new(BTreeMap::new()),
+            self_mountpoint,
+            self_ref: fs_ref.clone(),
+            self_root_inode: Weak::new(),
+            dcache: DCache::new(),
+        });
+        let root = Arc::new_cyclic(|node_self| MountFSInode {
+            inner_inode: inner_fs.root_inode(),
+            mount_fs: ret.clone(),
+            self_ref: node_self.clone(),
+            name: Arc::default(),
+            parent: Weak::new(),
+            children: Arc::new(RwLock::new(HashSet::new())),
         });
         ret.dcache.put(&root);
-        unsafe { Arc::get_mut_unchecked(&mut ret).self_root_inode = Arc::downgrade(&root); }
+        unsafe {
+            Arc::get_mut_unchecked(&mut ret).self_root_inode = Arc::downgrade(&root);
+        }
         return ret;
     }
 
@@ -219,7 +222,8 @@ impl MountFSInode {
                     name: Arc::new(String::from(name)),
                     parent: self.self_ref.clone(),
                     children: Arc::new(RwLock::new(HashSet::new())),
-                }).overlaid_inode();
+                })
+                .overlaid_inode();
                 // 按道理加入挂载点后，这里不需要替换inode
                 self.children.write();
                 self.mount_fs.dcache.put(&ret);
@@ -300,14 +304,13 @@ impl MountFSInode {
             }
         }
 
-        return Ok(self.parent.upgrade().unwrap_or(self.self_ref.upgrade().unwrap()));
+        return Ok(self
+            .parent
+            .upgrade()
+            .unwrap_or(self.self_ref.upgrade().unwrap()));
     }
 
-    fn _create(
-        &self,
-        name: Arc<String>,
-        inner: Arc<dyn IndexNode>,
-    ) -> Arc<MountFSInode> {
+    fn _create(&self, name: Arc<String>, inner: Arc<dyn IndexNode>) -> Arc<MountFSInode> {
         let ret = Arc::new_cyclic(|self_ref| MountFSInode {
             inner_inode: inner.clone(),
             mount_fs: self.mount_fs.clone(),
@@ -317,7 +320,9 @@ impl MountFSInode {
             children: Arc::new(RwLock::new(HashSet::new())),
         });
 
-        self.children.write().insert(Key::Inner(MountNameCmp(Arc::downgrade(&ret))));
+        self.children
+            .write()
+            .insert(Key::Inner(MountNameCmp(Arc::downgrade(&ret))));
         self.mount_fs.dcache.put(&ret);
 
         return ret;
@@ -325,7 +330,6 @@ impl MountFSInode {
 
     fn _link(&self, name: Arc<String>, other: Arc<dyn IndexNode>) -> Result<(), SystemError> {
         if let Some(target) = other.downcast_arc::<MountFSInode>() {
-
             let to_link = Arc::new_cyclic(|self_ref| MountFSInode {
                 inner_inode: target.inner_inode.clone(),
                 mount_fs: self.mount_fs.clone(),
@@ -335,7 +339,9 @@ impl MountFSInode {
                 children: target.children.clone(),
             });
 
-            self.children.write().insert(Key::Inner(MountNameCmp(Arc::downgrade(&to_link))));
+            self.children
+                .write()
+                .insert(Key::Inner(MountNameCmp(Arc::downgrade(&to_link))));
             self.mount_fs.dcache.put(&target);
 
             return Ok(());
@@ -364,7 +370,9 @@ impl IndexNode for MountFSInode {
         mode: ModeType,
         data: usize,
     ) -> Result<Arc<dyn IndexNode>, SystemError> {
-        let inner_inode = self.inner_inode.create_with_data(name, file_type, mode, data)?;
+        let inner_inode = self
+            .inner_inode
+            .create_with_data(name, file_type, mode, data)?;
         let ret = Arc::new_cyclic(|self_ref| MountFSInode {
             inner_inode,
             mount_fs: self.mount_fs.clone(),
@@ -374,7 +382,9 @@ impl IndexNode for MountFSInode {
             children: Arc::new(RwLock::new(HashSet::new())),
         });
 
-        self.children.write().insert(Key::Inner(MountNameCmp(Arc::downgrade(&ret))));
+        self.children
+            .write()
+            .insert(Key::Inner(MountNameCmp(Arc::downgrade(&ret))));
         self.mount_fs.dcache.put(&ret);
 
         return Ok(ret);
@@ -446,7 +456,9 @@ impl IndexNode for MountFSInode {
             children: Arc::new(RwLock::new(HashSet::new())),
         });
 
-        self.children.write().insert(Key::Inner(MountNameCmp(Arc::downgrade(&ret))));
+        self.children
+            .write()
+            .insert(Key::Inner(MountNameCmp(Arc::downgrade(&ret))));
         self.mount_fs.dcache.put(&ret);
 
         return Ok(ret);
@@ -470,11 +482,11 @@ impl IndexNode for MountFSInode {
         }
 
         // 调用内层的inode的方法来删除这个inode
-        if let Err(err) = self.inner_inode.unlink(name) {
-            return Err(err);
-        }
+        self.inner_inode.unlink(name)?;
 
-        self.children.write().remove(&Key::Cmp(Arc::new(String::from(name))));
+        self.children
+            .write()
+            .remove(&Key::Cmp(Arc::new(String::from(name))));
 
         return Ok(());
     }
@@ -488,11 +500,11 @@ impl IndexNode for MountFSInode {
             return Err(SystemError::EBUSY);
         }
         // 调用内层的rmdir的方法来删除这个inode
-        if let Err(e) = self.inner_inode.rmdir(name) {
-            return Err(e);
-        }
+        self.inner_inode.rmdir(name)?;
 
-        self.children.write().remove(&Key::Cmp(Arc::new(String::from(name))));
+        self.children
+            .write()
+            .remove(&Key::Cmp(Arc::new(String::from(name))));
 
         return Ok(());
     }
@@ -504,12 +516,15 @@ impl IndexNode for MountFSInode {
         target: &Arc<dyn IndexNode>,
         new_name: &str,
     ) -> Result<(), SystemError> {
-        self.children.write().remove(&Key::Cmp(Arc::new(String::from(old_name))));
+        self.children
+            .write()
+            .remove(&Key::Cmp(Arc::new(String::from(old_name))));
         let to_move = self.find(old_name)?;
         if let Some(target1) = target.clone().downcast_arc::<MountFSInode>() {
-
             target1._link(Arc::new(String::from(new_name)), to_move)?;
-            self.children.write().remove(&Key::Cmp(Arc::new(String::from(old_name))));
+            self.children
+                .write()
+                .remove(&Key::Cmp(Arc::new(String::from(old_name))));
 
             self.inner_inode.move_to(old_name, target, new_name)?;
             return Ok(());
@@ -598,7 +613,9 @@ impl IndexNode for MountFSInode {
             parent: self.self_ref.clone(),
             children: Arc::new(RwLock::new(HashSet::new())),
         });
-        self.children.write().insert(Key::Inner(MountNameCmp(Arc::downgrade(&ret))));
+        self.children
+            .write()
+            .insert(Key::Inner(MountNameCmp(Arc::downgrade(&ret))));
         self.mount_fs.dcache.put(&ret);
         return Ok(ret);
     }
@@ -645,7 +662,6 @@ impl IndexNode for MountFSInode {
         path.extend(path_stack);
         return Ok(path);
     }
-
 }
 
 impl FileSystem for MountFS {

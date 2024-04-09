@@ -1,7 +1,9 @@
 use super::{MountFS, MountFSInode};
 use crate::{filesystem::vfs::utils::Keyable, libs::rwlock::RwLock};
 use alloc::{
-    collections::BTreeMap, string::String, sync::{Arc, Weak}
+    collections::BTreeMap,
+    string::String,
+    sync::{Arc, Weak},
 };
 use path_base::{clean_path::Clean, Path, PathBuf};
 
@@ -104,7 +106,7 @@ impl MountList {
 }
 
 #[derive(Debug)]
-pub(super) struct MountNameCmp (pub Weak<MountFSInode>);
+pub(super) struct MountNameCmp(pub Weak<MountFSInode>);
 
 impl Keyable for MountNameCmp {
     fn key(&self) -> Arc<String> {
