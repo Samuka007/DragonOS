@@ -293,9 +293,10 @@ impl EventPoll {
             .ok_or(SystemError::EBADF)?;
 
         // 检查是否允许 EPOLLWAKEUP
-        if op != EPollCtlOption::Del {
-            epds.events &= !EPollEventType::EPOLLWAKEUP.bits();
-        }
+        // if op != EPollCtlOption::Del {
+        //     epds.events &= !EPollEventType::EPOLLWAKEUP.bits();
+        // }
+        let target_is_epoll = Self::is_epoll_file(&dst_file);
 
         let events = EPollEventType::from_bits_truncate(epds.events);
 
@@ -313,7 +314,7 @@ impl EventPoll {
             }
 
             // 不支持嵌套的独占唤醒
-            if op == EPollCtlOption::Add && Self::is_epoll_file(&dst_file)
+            if target_is_epoll && op == EPollCtlOption::Add
                 || !events
                     .difference(EPollEventType::EPOLLEXCLUSIVE_OK_BITS)
                     .is_empty()
@@ -327,44 +328,38 @@ impl EventPoll {
             let mut epoll_guard = {
                 if nonblock {
                     // 如果设置非阻塞，则尝试获取一次锁
-                    if let Ok(guard) = epoll_data.epoll.0.try_lock_irqsave() {
-                        guard
-                    } else {
-                        return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
-                    }
+                    epoll_data.epoll.0.try_lock_irqsave().or(Err(SystemError::EAGAIN_OR_EWOULDBLOCK))?
                 } else {
                     epoll_data.epoll.0.lock_irqsave()
                 }
             };
 
-            if op == EPollCtlOption::Add {
+            if target_is_epoll && op == EPollCtlOption::Add {
                 // TODO: 循环检查是否为epoll嵌套epoll的情况，如果是则需要检测其深度
                 // 这里是需要一种检测算法的，但是目前未考虑epoll嵌套epoll的情况，所以暂时未实现
                 // Linux算法：https://code.dragonos.org.cn/xref/linux-6.1.9/fs/eventpoll.c?r=&mo=56953&fi=2057#2133
-                if Self::is_epoll_file(&dst_file) {
-                    todo!();
-                }
+                todo!("未考虑epoll嵌套epoll的情况");
             }
 
-            let ep_item = epoll_guard.ep_items.get(&fd);
+            let item_got = epoll_guard.ep_items.get(&fd);
             match op {
                 EPollCtlOption::Add => {
                     // 如果已经存在，则返回错误
-                    if ep_item.is_some() {
+                    if item_got.is_some() {
                         return Err(SystemError::EEXIST);
                     }
                     // 设置epoll
-                    let epitem = Arc::new(EPollItem::new(
+                    let item_add = Arc::new(EPollItem::new(
                         Arc::downgrade(&epoll_data.epoll.0),
                         *epds,
                         fd,
                         Arc::downgrade(&dst_file),
                     ));
-                    Self::ep_insert(&mut epoll_guard, dst_file, epitem)?;
+                    Self::ep_insert(&mut epoll_guard, dst_file, item_add)?;
                 }
                 EPollCtlOption::Del => {
                     // 不存在则返回错误
-                    if ep_item.is_none() {
+                    if item_got.is_none() {
                         return Err(SystemError::ENOENT);
                     }
                     // 删除
@@ -372,10 +367,10 @@ impl EventPoll {
                 }
                 EPollCtlOption::Mod => {
                     // 不存在则返回错误
-                    if ep_item.is_none() {
+                    if item_got.is_none() {
                         return Err(SystemError::ENOENT);
                     }
-                    let ep_item = ep_item.unwrap().clone();
+                    let ep_item = item_got.unwrap().clone();
                     if ep_item.event.read().events & EPollEventType::EPOLLEXCLUSIVE.bits() != 0 {
                         epds.events |=
                             EPollEventType::EPOLLERR.bits() | EPollEventType::EPOLLHUP.bits();
@@ -390,6 +385,7 @@ impl EventPoll {
     }
 
     /// ## epoll_wait的具体实现
+    /// ep_poll
     pub fn do_epoll_wait(
         epfd: i32,
         epoll_event: &mut [EPollEvent],
@@ -397,15 +393,13 @@ impl EventPoll {
         timespec: Option<PosixTimeSpec>,
     ) -> Result<usize, SystemError> {
         let current_pcb = ProcessManager::current_pcb();
-        let fd_table = current_pcb.fd_table();
-        let fd_table_guard = fd_table.read();
 
         // 获取epoll文件
-        let ep_file = fd_table_guard
+        let ep_file = current_pcb
+            .fd_table()
+            .read()
             .get_file_by_fd(epfd)
             .ok_or(SystemError::EBADF)?;
-
-        drop(fd_table_guard);
 
         // 确保是epoll file
         if !Self::is_epoll_file(&ep_file) {
@@ -413,97 +407,95 @@ impl EventPoll {
         }
 
         // 从epoll文件获取到epoll
-        let mut epolldata = None;
-        if let FilePrivateData::EPoll(epoll_data) = &*ep_file.private_data.lock() {
-            epolldata = Some(epoll_data.clone())
+        let epoll_data = match &*ep_file.private_data.lock() {
+            FilePrivateData::EPoll(epoll_data) => epoll_data.clone(),
+            _ => panic!("Expected EPollPrivateData"),
+        };
+
+        // cont MAX_SIZE = 4096;
+        // manager: Vec<Option<Arc<TimerUnit>>;
+        // init() { self.manager.}
+
+        // TODO: slack
+        let mut to = 0;
+        let mut timed_out = false;
+
+        if let Some(timespec) = timespec {
+            if timespec.tv_sec > 0 || timespec.tv_nsec > 0 {
+                to = next_n_us_timer_jiffies(
+                    (timespec.tv_sec * 1000000 + timespec.tv_nsec / 1000) as u64,
+                );
+            } else {
+                // 非阻塞
+                timed_out = true;
+            }
         }
-        if let Some(epoll_data) = epolldata {
-            let epoll = epoll_data.epoll.clone();
-            let epoll_guard = epoll.0.lock_irqsave();
 
-            let mut timeout = false;
-            if let Some(timespec) = timespec {
-                if !(timespec.tv_sec > 0 || timespec.tv_nsec > 0) {
-                    // 非阻塞情况
-                    timeout = true;
+        let epoll = epoll_data.epoll.clone();
+
+        let mut available = epoll.0.lock_irqsave().ep_events_available();
+        'a: loop {
+            if available {
+                // 如果有就绪的事件，则直接返回就绪事件
+                let ret = Self::ep_send_events(epoll.clone(), epoll_event, max_events)?;
+                if ret > 0 {
+                    return Ok(ret);
                 }
             }
-            // 判断epoll上有没有就绪事件
-            let mut available = epoll_guard.ep_events_available();
-            drop(epoll_guard);
-            loop {
-                if available {
-                    // 如果有就绪的事件，则直接返回就绪事件
-                    return Self::ep_send_events(epoll.clone(), epoll_event, max_events);
+
+            // 如果已经关闭: Unmachable in linux code with unknown perpose.
+            if epoll.0.lock_irqsave().shutdown.load(Ordering::SeqCst) {
+                return Err(SystemError::EBADF);
+            }
+
+            if timed_out {
+                return Ok(0);
+            }
+
+            // 自旋等待一段时间
+            // busy loop start...
+            for _ in 0..50 {
+                if epoll.0.try_lock_irqsave().is_ok_and(
+                    |guard| guard.ep_events_available()
+                ) {
+                    available = true;
+                    continue 'a;
                 }
+            }
+            if epoll.0.lock_irqsave().ep_events_available() {
+                available = true;
+                continue;
+            }
+            // ...busy loop end here. Blocking spin check
 
-                if epoll.0.lock_irqsave().shutdown.load(Ordering::SeqCst) {
-                    // 如果已经关闭
-                    return Err(SystemError::EBADF);
-                }
+            // 如果有未处理的信号则返回错误
+            if current_pcb.sig_info_irqsave().sig_pending().signal().bits() != 0 {
+                return Err(SystemError::EINTR);
+            }
 
-                // 如果超时
-                if timeout {
-                    return Ok(0);
-                }
-
-                // 自旋等待一段时间
-                available = {
-                    let mut ret = false;
-                    for _ in 0..50 {
-                        if let Ok(guard) = epoll.0.try_lock_irqsave() {
-                            if guard.ep_events_available() {
-                                ret = true;
-                                break;
-                            }
-                        }
-                    }
-                    // 最后再次不使用try_lock尝试
-                    if !ret {
-                        ret = epoll.0.lock_irqsave().ep_events_available();
-                    }
-                    ret
-                };
-
-                if available {
-                    continue;
-                }
-
-                // 如果有未处理的信号则返回错误
-                if current_pcb.sig_info_irqsave().sig_pending().signal().bits() != 0 {
-                    return Err(SystemError::EINTR);
-                }
-
-                // 还未等待到事件发生，则睡眠
+            // 还未等待到事件发生，则睡眠
+            if to != 0 {
+                let handle = WakeUpHelper::new(current_pcb.clone());
                 // 注册定时器
-                let mut timer = None;
-                if let Some(timespec) = timespec {
-                    let handle = WakeUpHelper::new(current_pcb.clone());
-                    let jiffies = next_n_us_timer_jiffies(
-                        (timespec.tv_sec * 1000000 + timespec.tv_nsec / 1000) as u64,
-                    );
-                    let inner = Timer::new(handle, jiffies);
-                    inner.activate();
-                    timer = Some(inner);
-                }
-                let guard = epoll.0.lock_irqsave();
-                unsafe { guard.epoll_wq.sleep_without_schedule() };
-                drop(guard);
+                let timer = Timer::new(handle, to);
+                timer.activate();
+
+                unsafe { epoll.0.lock_irqsave().epoll_wq.sleep_without_schedule() };
                 schedule(SchedMode::SM_NONE);
-                // 被唤醒后,检查是否有事件可读
-                available = epoll.0.lock_irqsave().ep_events_available();
-                if let Some(timer) = timer {
-                    if timer.as_ref().timeout() {
-                        // 超时
-                        timeout = true;
-                    } else {
-                        // 未超时，则取消计时器
-                        timer.cancel();
-                    }
+
+                if timer.timeout() {
+                    // 超时
+                    timed_out = true;
+                } else {
+                    // 未超时，则取消计时器
+                    timer.cancel();
                 }
+            } else {
+                unsafe { epoll.0.lock_irqsave().epoll_wq.sleep_without_schedule() };
+                schedule(SchedMode::SM_NONE);
             }
-        } else {
-            panic!("An epoll file does not have the corresponding private information");
+            // Should be available
+            available = true;
         }
     }
 
