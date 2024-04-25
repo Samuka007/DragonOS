@@ -6,12 +6,12 @@ use smoltcp::{
 use system_error::SystemError;
 
 use crate::{
-    driver::net::NetDriver,
+    driver::net::NetDevice,
     kerror, kwarn,
     libs::{rwlock::RwLock, wait_queue::EventWaitQueue},
     net::{
         event_poll::EPollEventType, net_core::poll_ifaces, Endpoint, Protocol, ShutdownType,
-        NET_DRIVERS,
+        NET_DEVICES,
     },
 };
 
@@ -110,7 +110,7 @@ impl Socket for RawSocket {
                         })),
                     );
                 }
-                Err(raw::RecvError::Exhausted) => {
+                Err(_) => {
                     if !self.metadata.options.contains(SocketOptions::BLOCK) {
                         // 如果是非阻塞的socket，就返回错误
                         return (Err(SystemError::EAGAIN_OR_EWOULDBLOCK), Endpoint::Ip(None));
@@ -149,7 +149,7 @@ impl Socket for RawSocket {
                     socket_set_guard.get_mut::<raw::Socket>(self.handle.smoltcp_handle().unwrap());
 
                 // 暴力解决方案：只考虑0号网卡。 TODO：考虑多网卡的情况！！！
-                let iface = NET_DRIVERS.read_irqsave().get(&0).unwrap().clone();
+                let iface = NET_DEVICES.read_irqsave().get(&0).unwrap().clone();
 
                 // 构造IP头
                 let ipv4_src_addr: Option<wire::Ipv4Address> =
@@ -325,10 +325,10 @@ impl Socket for UdpSocket {
             // kdebug!("Wait to Read");
 
             if socket.can_recv() {
-                if let Ok((size, remote_endpoint)) = socket.recv_slice(buf) {
+                if let Ok((size, metadata)) = socket.recv_slice(buf) {
                     drop(socket_set_guard);
                     poll_ifaces();
-                    return (Ok(size), Endpoint::Ip(Some(remote_endpoint)));
+                    return (Ok(size), Endpoint::Ip(Some(metadata.endpoint)));
                 }
             } else {
                 // 如果socket没有连接，则忙等
@@ -590,37 +590,33 @@ impl Socket for TcpSocket {
             }
 
             if socket.may_recv() {
-                let recv_res = socket.recv_slice(buf);
+                match socket.recv_slice(buf) {
+                    Ok(size) => {
+                        if size > 0 {
+                            let endpoint = if let Some(p) = socket.remote_endpoint() {
+                                p
+                            } else {
+                                return (Err(SystemError::ENOTCONN), Endpoint::Ip(None));
+                            };
 
-                if let Ok(size) = recv_res {
-                    if size > 0 {
-                        let endpoint = if let Some(p) = socket.remote_endpoint() {
-                            p
-                        } else {
-                            return (Err(SystemError::ENOTCONN), Endpoint::Ip(None));
-                        };
-
-                        drop(socket_set_guard);
-                        poll_ifaces();
-                        return (Ok(size), Endpoint::Ip(Some(endpoint)));
+                            drop(socket_set_guard);
+                            poll_ifaces();
+                            return (Ok(size), Endpoint::Ip(Some(endpoint)));
+                        }
                     }
-                } else {
-                    let err = recv_res.unwrap_err();
-                    match err {
-                        tcp::RecvError::InvalidState => {
-                            kwarn!("Tcp Socket Read Error, InvalidState");
-                            return (Err(SystemError::ENOTCONN), Endpoint::Ip(None));
-                        }
-                        tcp::RecvError::Finished => {
-                            // 对端写端已关闭，我们应该关闭读端
-                            HANDLE_MAP
-                                .write_irqsave()
-                                .get_mut(&self.socket_handle())
-                                .unwrap()
-                                .shutdown_type_writer()
-                                .insert(ShutdownType::RCV_SHUTDOWN);
-                            return (Err(SystemError::ENOTCONN), Endpoint::Ip(None));
-                        }
+                    Err(tcp::RecvError::InvalidState) => {
+                        kwarn!("Tcp Socket Read Error, InvalidState");
+                        return (Err(SystemError::ENOTCONN), Endpoint::Ip(None));
+                    }
+                    Err(tcp::RecvError::Finished) => {
+                        // 对端写端已关闭，我们应该关闭读端
+                        HANDLE_MAP
+                            .write_irqsave()
+                            .get_mut(&self.socket_handle())
+                            .unwrap()
+                            .shutdown_type_writer()
+                            .insert(ShutdownType::RCV_SHUTDOWN);
+                        return (Err(SystemError::ENOTCONN), Endpoint::Ip(None));
                     }
                 }
             } else {
@@ -702,7 +698,7 @@ impl Socket for TcpSocket {
             PORT_MANAGER.bind_port(self.metadata.socket_type, temp_port, self.clone())?;
 
             // kdebug!("temp_port: {}", temp_port);
-            let iface: Arc<dyn NetDriver> = NET_DRIVERS.write_irqsave().get(&0).unwrap().clone();
+            let iface: Arc<dyn NetDevice> = NET_DEVICES.write_irqsave().get(&0).unwrap().clone();
             let mut inner_iface = iface.inner_iface().lock();
             // kdebug!("to connect: {ip:?}");
 
