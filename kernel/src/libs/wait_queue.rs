@@ -345,7 +345,7 @@ impl EventWaitQueue {
 
         let mut wq_guard = self.wait_list.lock_irqsave();
         wq_guard.retain(|(es, pcb)| {
-            if *es & events > 0 {
+            if ((*es) & events) > 0 {
                 // 有感兴趣的事件
                 if ProcessManager::wakeup(pcb).is_ok() {
                     ret += 1;
