@@ -218,6 +218,7 @@ int main(int argc, char const *argv[])
         exit(EXIT_CODE);
     }
 
+    char request[MAX_REQUEST_SIZE] = "HTTP/1.1 404 Not Found\nContent-Type: text/html\n\n<html><body><h1>404 Not Found</h1><p>DragonOS Http Server</p></body></html>";
     while (connected_clients < 100)
     {
         printf("[%d] Waiting for a client...\n", connected_clients);
@@ -233,25 +234,34 @@ int main(int argc, char const *argv[])
         }
 
         // 接收客户端消息
-        printf("[%d] Try read message.\n", connected_clients);
+        // clear buffer
+        memset(buffer, 0, MAX_REQUEST_SIZE);
         valread = read(new_socket, buffer, MAX_REQUEST_SIZE);
-        printf("[%d] Receive message: %s\n", connected_clients, buffer);
+        // buffer[strlen(buffer)-1] = ' ';
+        // buffer[strlen(buffer)-2] = ' ';
+        // buffer[strlen(buffer)-3] = ' ';
 
-        char to_sent_start[] = "HTTP/1.1 404 Not Found\nContent-Type: text/html\n\n<html><body><h1>404 Not Found</h1><p>DragonOS Http Server\n";
-        char to_sent_end[] = "</p></body></html>";
-        // request = to_sent_start + buffer + to_sent_end;
-        char request[MAX_REQUEST_SIZE];
-        strcpy(request, to_sent_start);
-        strcat(request, buffer);
-        strcat(request, to_sent_end);
+        // char to_sent_start[] = "HTTP/1.1 404 Not Found\nContent-Type: text/html\n\n<html><body><h1>404 Not Found</h1><p>DragonOS Http Server\n";
+        // char to_sent_end[] = "</p></body></html>";
+        // // request = to_sent_start + buffer + to_sent_end;
+        // memset(request, 0, MAX_REQUEST_SIZE);
+        // strcpy(request, to_sent_start);
+        // strcat(request, buffer);
+        // strcat(request, to_sent_end);
+        // strcpy(request, "HTTP/1.1 404 Not Found\nContent-Type: text/html\n\n<html><body><h1>404 Not Found</h1><p>DragonOS Http Server</p></body></html>");        
 
         // 处理请求
         send_response(new_socket, request);
+        // puts("Sent: ");
+        // puts(request);
+        // usleep(500000);
 
         // 关闭客户端连接
         close(new_socket);
-        printf("[%d] Close.\n\n", connected_clients);
+        // printf("[%d] Close.\n\n", connected_clients);
         connected_clients += 1;
+        // sleep 1s
+        // sleep(1);
     }
 
     return 0;

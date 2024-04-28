@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     event_poll::{EPollEventType, EventPoll},
-    socket::{handle::GlobalSocketHandle, inet::TcpSocket, HANDLE_MAP, SOCKET_SET},
+    socket::{handle::GlobalSocketHandle, inet::TcpSocket, HANDLE_MAP, SLEEPING_SOCKETS, SOCKET_SET}, ShutdownType,
 };
 
 /// The network poll function, which will be called by timer.
@@ -186,6 +186,7 @@ pub fn poll_ifaces_try_lock_onetime() -> Result<(), SystemError> {
 
 /// ### 处理轮询后的事件
 fn send_event(sockets: &smoltcp::iface::SocketSet) -> Result<(), SystemError> {
+    // let mut all = 0;
     for (handle, socket_type) in sockets.iter() {
         let handle_guard = HANDLE_MAP.read_irqsave();
         let global_handle = GlobalSocketHandle::new_smoltcp_handle(handle);
@@ -201,31 +202,42 @@ fn send_event(sockets: &smoltcp::iface::SocketSet) -> Result<(), SystemError> {
             SocketPollMethod::poll(socket_type, handle_item.shutdown_type()).bits() as u64;
 
         // 分发到相应类型socket处理
-        match socket_type {
+        let wakup = match socket_type {
             smoltcp::socket::Socket::Raw(_) | smoltcp::socket::Socket::Udp(_) => {
                 handle_guard
                     .get(&global_handle)
                     .unwrap()
                     .wait_queue
-                    .wakeup_any(events);
+                    .wakeup_any(events)
             }
             smoltcp::socket::Socket::Icmp(_) => unimplemented!("Icmp socket hasn't unimplemented"),
             smoltcp::socket::Socket::Tcp(inner_socket) => {
+                // if events & 1 != 0 {
+                //     // kdebug!("Active Handle: {:?}", handle);
+                //     kdebug!("[Sent] tcp sock: {:?}", handle);
+                // }
                 if inner_socket.is_active() {
+                    // kdebug!("Event include 1? {:?}", events & 1 != 0);
                     events |= TcpSocket::CAN_ACCPET;
                 }
                 if inner_socket.state() == smoltcp::socket::tcp::State::Established {
                     events |= TcpSocket::CAN_CONNECT;
                 }
-                let wake_num = handle_guard
+                if inner_socket.state() == smoltcp::socket::tcp::State::CloseWait {
+                    events |= EPollEventType::EPOLLHUP.bits() as u64;
+                }
+                // kdebug!("Socket State: {:?}", inner_socket.)
+                handle_guard
                     .get(&global_handle)
                     .unwrap()
                     .wait_queue
-                    .wakeup_any(events);
-                kdebug!("Sent {}, Waked {} socket", events, wake_num);
+                    .wakeup_any(events)
             }
-            smoltcp::socket::Socket::Dhcpv4(_) => {}
+            smoltcp::socket::Socket::Dhcpv4(_) => {0}
             smoltcp::socket::Socket::Dns(_) => unimplemented!("Dns socket hasn't unimplemented"),
+        };
+        if wakup > 0 {
+            SLEEPING_SOCKETS.write_irqsave().remove(&global_handle);
         }
         EventPoll::wakeup_epoll(
             &handle_item.epitems,
@@ -240,5 +252,9 @@ fn send_event(sockets: &smoltcp::iface::SocketSet) -> Result<(), SystemError> {
         //     EPollEventType::from_bits_truncate(events as u32)
         // );
     }
+    if SLEEPING_SOCKETS.read_irqsave().len() > 0 {
+        panic!("There are still sleeping sockets!");
+    }
+
     Ok(())
 }

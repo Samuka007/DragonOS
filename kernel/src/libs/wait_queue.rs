@@ -210,6 +210,7 @@ impl WaitQueue {
         let to_wakeup = guard.wait_list.pop_front().unwrap();
         drop(guard);
         let res = ProcessManager::wakeup(&to_wakeup).is_ok();
+        kdebug!("Waked up!");
         return res;
     }
 
@@ -309,7 +310,7 @@ impl EventWaitQueue {
         drop(guard);
         schedule(SchedMode::SM_NONE);
     }
-
+    // NOTICE
     pub unsafe fn sleep_without_schedule(&self, events: u64) {
         before_sleep_check(1);
         let mut guard = self.wait_list.lock_irqsave();
@@ -317,6 +318,10 @@ impl EventWaitQueue {
             panic!("sleep error: {:?}", e);
         });
         guard.push((events, ProcessManager::current_pcb()));
+        // if events == 1 {
+        //     // print out the memory location of wait_list
+        //     kdebug!("[sleep] wq ptr: {:p}", guard.as_ptr());
+        // }
         drop(guard);
     }
 
@@ -345,7 +350,7 @@ impl EventWaitQueue {
 
         let mut wq_guard = self.wait_list.lock_irqsave();
         wq_guard.retain(|(es, pcb)| {
-            if ((*es) & events) > 0 {
+            if (( *es ) & events) != 0 {
                 // 有感兴趣的事件
                 if ProcessManager::wakeup(pcb).is_ok() {
                     ret += 1;
@@ -367,6 +372,7 @@ impl EventWaitQueue {
     ///
     /// 需要注意的是，只有满足所有事件的进程才会被唤醒
     pub fn wakeup(&self, events: u64) -> usize {
+        kdebug!("Wakeup events {}", events);
         let mut ret = 0;
         let mut wq_guard = self.wait_list.lock_irqsave();
         wq_guard.retain(|(es, pcb)| {

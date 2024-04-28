@@ -7,7 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use smoltcp::{
     iface::SocketSet,
     socket::{self, raw, tcp, udp},
@@ -52,6 +52,8 @@ lazy_static! {
     pub static ref HANDLE_MAP: RwLock<HashMap<GlobalSocketHandle, SocketHandleItem>> = RwLock::new(HashMap::new());
     /// 端口管理器
     pub static ref PORT_MANAGER: PortManager = PortManager::new();
+
+    pub static ref SLEEPING_SOCKETS: RwLock<HashSet<GlobalSocketHandle>> = RwLock::new(HashSet::new());
 }
 
 /* For setsockopt(2) */
@@ -85,7 +87,7 @@ pub(super) fn new_socket(
         }
     };
 
-    let handle_item = SocketHandleItem::new(Arc::new(EventWaitQueue::new()));
+    let handle_item = SocketHandleItem::new(None);
     HANDLE_MAP
         .write_irqsave()
         .insert(socket.socket_handle(), handle_item);
@@ -406,10 +408,10 @@ pub struct SocketHandleItem {
 }
 
 impl SocketHandleItem {
-    pub fn new(wait_queue:Arc<EventWaitQueue>) -> Self {
+    pub fn new(wait_queue: Option<Arc<EventWaitQueue>>) -> Self {
         Self {
             shutdown_type: RwLock::new(ShutdownType::empty()),
-            wait_queue,
+            wait_queue: wait_queue.unwrap_or(Arc::new(EventWaitQueue::new())),
             epitems: SpinLock::new(LinkedList::new()),
         }
     }
@@ -427,6 +429,9 @@ impl SocketHandleItem {
                 .wait_queue
                 .sleep_without_schedule(events)
         };
+        SLEEPING_SOCKETS.write_irqsave().insert(socket_handle);
+        // kdebug!("sleeping socket: {:?}", socket_handle);
+        // kdebug!("sleeping socket: {:?}", *SLEEPING_SOCKETS.read_irqsave());
         drop(handle_map_guard);
         schedule(SchedMode::SM_NONE);
     }

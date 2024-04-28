@@ -25,9 +25,9 @@ async fn main() -> io::Result<()> {
     // 设置 TCP backlog 大小为 5
     let backlog_size = 5;
 
-    HttpServer::new(|| App::new().route("/", web::get().to(index)))
+    let server = HttpServer::new(|| App::new().route("/", web::get().to(index)))
         .backlog(backlog_size) // 设置 TCP backlog 大小
-        .bind("0.0.0.0:12580")?
-        .run()
+        .bind("0.0.0.0:12580")?;
+    server.run()
         .await
 }

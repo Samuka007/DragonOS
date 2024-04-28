@@ -280,6 +280,7 @@ impl EventPoll {
         epds: &mut EPollEvent,
         nonblock: bool,
     ) -> Result<usize, SystemError> {
+        kdebug!("Call epoll ctl, epfd: {}, op: {:?}, fd: {}, epds: {}", epfd, op, fd, epds.events());
         let current_pcb = ProcessManager::current_pcb();
         let fd_table = current_pcb.fd_table();
         let fd_table_guard = fd_table.read();
@@ -434,6 +435,7 @@ impl EventPoll {
             loop {
                 if available {
                     // 如果有就绪的事件，则直接返回就绪事件
+                    kdebug!("Available!");
                     return Self::ep_send_events(epoll.clone(), epoll_event, max_events);
                 }
 
