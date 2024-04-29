@@ -32,13 +32,12 @@ static __MM_DEBUG_LOG_IDA: ida::IdAllocator = ida::IdAllocator::new(1, usize::MA
 /// - `log_type`：日志类型
 /// - `source`：日志来源
 pub fn mm_debug_log(log_type: AllocatorLogType, source: LogSource) {
-    return;
-    // let pid = if unlikely(!ProcessManager::initialized()) {
-    //     Some(Pid::new(0))
-    // } else {
-    //     Some(ProcessManager::current_pcb().pid())
-    // };
-    // MMDebugLogManager::log(log_type, source, pid);
+    let pid = if unlikely(!ProcessManager::initialized()) {
+        Some(Pid::new(0))
+    } else {
+        Some(ProcessManager::current_pcb().pid())
+    };
+    MMDebugLogManager::log(log_type, source, pid);
 }
 
 #[derive(Debug)]

@@ -23,7 +23,7 @@ use crate::{
     arch::{interrupt::ipi::send_ipi, CurrentIrqArch},
     exception::{
         ipi::{IpiKind, IpiTarget},
-        InterruptArch, IrqFlagsGuard,
+        InterruptArch,
     },
     libs::{
         lazy_init::Lazy,
