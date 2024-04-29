@@ -7,7 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use smoltcp::{
     iface::SocketSet,
     socket::{self, raw, tcp, udp},
@@ -52,8 +52,6 @@ lazy_static! {
     pub static ref HANDLE_MAP: RwLock<HashMap<GlobalSocketHandle, SocketHandleItem>> = RwLock::new(HashMap::new());
     /// 端口管理器
     pub static ref PORT_MANAGER: PortManager = PortManager::new();
-
-    pub static ref SLEEPING_SOCKETS: RwLock<HashSet<GlobalSocketHandle>> = RwLock::new(HashSet::new());
 }
 
 /* For setsockopt(2) */
@@ -429,7 +427,7 @@ impl SocketHandleItem {
                 .wait_queue
                 .sleep_without_schedule(events)
         };
-        SLEEPING_SOCKETS.write_irqsave().insert(socket_handle);
+        // SLEEPING_SOCKETS.write_irqsave().insert(socket_handle);
         // kdebug!("sleeping socket: {:?}", socket_handle);
         // kdebug!("sleeping socket: {:?}", *SLEEPING_SOCKETS.read_irqsave());
         drop(handle_map_guard);

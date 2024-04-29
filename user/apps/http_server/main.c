@@ -17,8 +17,6 @@
 
 #define DEFAULT_PAGE "/index.html"
 
-unsigned connected_clients = 0;
-
 int security_check(char *path)
 {
     // 检查路径是否包含 ..
@@ -73,10 +71,11 @@ void send_header(int sockfd, int content_length, char *path)
 
 void send_file(int sockfd, char *path)
 {
+    printf("send_file: path: %s\n", path);
+
     int fd = open(path, 0);
     if (fd == -1)
     {
-        printf("[%d] [404] Not found, path: %s\n", connected_clients, path);
         send_response(
             sockfd,
             "HTTP/1.1 404 Not Found\nContent-Type: text/html\n\n<html><body><h1>404 Not Found</h1><p>DragonOS Http Server</p></body></html>");
@@ -85,8 +84,7 @@ void send_file(int sockfd, char *path)
 
     int content_length = lseek(fd, 0, SEEK_END);
     int remaining = content_length;
-    printf("[%d] send_file: path: %s\n", connected_clients, path);
-    printf("[%d] send_file: content_length: %d\n", connected_clients, content_length);
+    printf("send_file: content_length: %d\n", content_length);
     lseek(fd, 0, SEEK_SET);
     send_header(sockfd, content_length, path);
 
@@ -105,7 +103,7 @@ void send_file(int sockfd, char *path)
             int wsize = write(sockfd, p, min(readSize, MAX_RESPONSE_SIZE));
             if (wsize <= 0)
             {
-                printf("[%d] send_file failed: wsize: %d\n", connected_clients, wsize);
+                printf("send_file failed: wsize: %d\n", wsize);
                 close(fd);
                 return;
             }
@@ -126,11 +124,10 @@ void handle_request(int sockfd, char *request)
     url = strtok(NULL, " ");
     http_version = strtok(NULL, "\r\n");
     
-    printf("[%d] handle_request: method: %s, url: %s, http_version: %s\n", connected_clients, method, url, http_version);
+    printf("handle_request: method: %s, url: %s, http_version: %s\n", method, url, http_version);
     // 检查空指针等异常情况
     if (method == NULL || url == NULL || http_version == NULL)
     {
-        printf("[%d] [400] Bad Request\n", connected_clients);
         send_response(sockfd, "HTTP/1.1 400 Bad Request\nContent-Type: text/html\n\n<html><body><h1>400 Bad "
                               "Request</h1><p>DragonOS Http Server</p></body></html>");
         return;
@@ -138,7 +135,6 @@ void handle_request(int sockfd, char *request)
     // 检查url是否为空
     if (strlen(url) == 0)
     {
-        printf("[%d] [400] Bad Request\n", connected_clients);
         send_response(sockfd, "HTTP/1.1 400 Bad Request\nContent-Type: text/html\n\n<html><body><h1>400 Bad "
                               "Request</h1><p>DragonOS Http Server</p></body></html>");
         return;
@@ -161,7 +157,6 @@ void handle_request(int sockfd, char *request)
         }
         if (!security_check(path))
         {
-            printf("[%d] [403] Forbidden\n", connected_clients);
             send_response(
                 sockfd,
                 "HTTP/1.1 403 Forbidden\nContent-Type: text/html\n\n<html><body><h1>403 Forbidden</h1><p>DragonOS Http Server</p></body></html>");
@@ -171,7 +166,6 @@ void handle_request(int sockfd, char *request)
     }
     else
     {
-        printf("[%d] [501] Not Implemented\n", connected_clients);
         send_response(sockfd, "HTTP/1.1 501 Not Implemented\nContent-Type: text/html\n\n<html><body><h1>501 Not "
                               "Implemented</h1><p>DragonOS Http Server</p></body></html>");
     }
@@ -218,50 +212,26 @@ int main(int argc, char const *argv[])
         exit(EXIT_CODE);
     }
 
-    char request[MAX_REQUEST_SIZE] = "HTTP/1.1 404 Not Found\nContent-Type: text/html\n\n<html><body><h1>404 Not Found</h1><p>DragonOS Http Server</p></body></html>";
-    while (connected_clients < 100)
+    while (1)
     {
-        printf("[%d] Waiting for a client...\n", connected_clients);
+        printf("Waiting for a client...\n");
 
         // 等待并接受客户端连接
         if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen)) < 0)
         {
-            printf("[%d] accept failed", connected_clients);
-            char e_msg[] = "[10] Accept failed";
-            sprintf(e_msg, "[%d] Accept failed", connected_clients);
-            perror(e_msg);
+            perror("accept failed");
             exit(EXIT_CODE);
         }
 
         // 接收客户端消息
-        // clear buffer
-        memset(buffer, 0, MAX_REQUEST_SIZE);
         valread = read(new_socket, buffer, MAX_REQUEST_SIZE);
-        // buffer[strlen(buffer)-1] = ' ';
-        // buffer[strlen(buffer)-2] = ' ';
-        // buffer[strlen(buffer)-3] = ' ';
-
-        // char to_sent_start[] = "HTTP/1.1 404 Not Found\nContent-Type: text/html\n\n<html><body><h1>404 Not Found</h1><p>DragonOS Http Server\n";
-        // char to_sent_end[] = "</p></body></html>";
-        // // request = to_sent_start + buffer + to_sent_end;
-        // memset(request, 0, MAX_REQUEST_SIZE);
-        // strcpy(request, to_sent_start);
-        // strcat(request, buffer);
-        // strcat(request, to_sent_end);
-        // strcpy(request, "HTTP/1.1 404 Not Found\nContent-Type: text/html\n\n<html><body><h1>404 Not Found</h1><p>DragonOS Http Server</p></body></html>");        
+        printf("%s\n", buffer);
 
         // 处理请求
-        send_response(new_socket, request);
-        // puts("Sent: ");
-        // puts(request);
-        // usleep(500000);
+        handle_request(new_socket, buffer);
 
         // 关闭客户端连接
         close(new_socket);
-        // printf("[%d] Close.\n\n", connected_clients);
-        connected_clients += 1;
-        // sleep 1s
-        // sleep(1);
     }
 
     return 0;

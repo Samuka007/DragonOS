@@ -115,6 +115,7 @@ impl Socket for RawSocket {
                 }
             }
             drop(socket_set_guard);
+            kdebug!("[UDP] [Read] sleeping socket with handle: {:?}", self.handle);
             SocketHandleItem::sleep(
                 self.socket_handle(),
                 EPollEventType::EPOLLIN.bits() as u64,
@@ -332,6 +333,7 @@ impl Socket for UdpSocket {
                 // return (Err(SystemError::ENOTCONN), Endpoint::Ip(None));
             }
             drop(socket_set_guard);
+            kdebug!("[UDP] [Read] sleeping socket with handle: {:?}", self.handle);
             SocketHandleItem::sleep(
                 self.socket_handle(),
                 EPollEventType::EPOLLIN.bits() as u64,
@@ -584,20 +586,12 @@ impl Socket for TcpSocket {
 
             let socket = socket_set_guard
                 .get_mut::<tcp::Socket>(self.handle_list.get(0).unwrap().smoltcp_handle().unwrap());
+            kdebug!("[Read] current socket state: {:?}", socket.state());
 
             // 如果socket已经关闭，返回错误
             if !socket.is_active() {
                 // kdebug!("Tcp Socket Read Error, socket is closed");
                 return (Err(SystemError::ENOTCONN), Endpoint::Ip(None));
-            }
-
-            if !socket.can_recv() {
-                let endpoint = if let Some(p) = socket.remote_endpoint() {
-                    p
-                } else {
-                    return (Err(SystemError::ENOTCONN), Endpoint::Ip(None));
-                };
-                return (Ok(0), Endpoint::Ip(Some(endpoint)));
             }
 
             if socket.may_recv() {
@@ -634,13 +628,12 @@ impl Socket for TcpSocket {
                 return (Err(SystemError::ENOTCONN), Endpoint::Ip(None));
             }
             drop(socket_set_guard);
-            kdebug!("[Read] sleeping socket with handle: {:?}", self.handle_list.get(0).unwrap().smoltcp_handle().unwrap());
+            kdebug!("[TCP] [Read] sleeping socket with handle: {:?}", self.handle_list.get(0).unwrap().smoltcp_handle().unwrap());
             SocketHandleItem::sleep(
                 self.socket_handle(),
                 (EPollEventType::EPOLLIN.bits() | EPollEventType::EPOLLHUP.bits()) as u64,
                 HANDLE_MAP.read_irqsave(),
             );
-            // kdebug!("[Read] wake");
         }
     }
 
@@ -912,7 +905,7 @@ impl Socket for TcpSocket {
                 }
                 drop(sockset);
             }
-            // kdebug!("[accept] sleep with handle: {:?}", self.handle_list.get(0).unwrap().smoltcp_handle().unwrap());
+            kdebug!("[TCP] [Accept] sleeping socket with handle: {:?}", self.handle_list.get(0).unwrap().smoltcp_handle().unwrap());
             SocketHandleItem::sleep(
                 self.socket_handle(), // NOTICE
                 Self::CAN_ACCPET,
