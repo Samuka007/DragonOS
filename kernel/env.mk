@@ -2,7 +2,7 @@ include ../env.mk
 
 # 设置编译器
 ifeq ($(ARCH), x86_64)
-CCPREFIX=x86_64-linux-gnu-
+CCPREFIX=
 else ifeq ($(ARCH), riscv64)
 CCPREFIX=riscv64-linux-gnu-
 else ifeq ($(ARCH), loongarch64)

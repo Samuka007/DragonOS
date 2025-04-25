@@ -31,7 +31,7 @@ clean:
 fmt:
 	RUSTFLAGS="$(RUSTFLAGS)" cargo fmt --all $(FMT_CHECK)
 ifeq ($(ARCH), x86_64)
-	RUSTFLAGS="$(RUSTFLAGS)" cargo +nightly-2024-11-05 clippy --all-features --target x86_64-unknown-none
+	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-features --target x86_64-unknown-none
 endif
 
 
@@ -41,7 +41,7 @@ check: ECHO
 
 test:
 # 测试内核库
-	RUSTFLAGS="$(RUSTFLAGS)" cargo +nightly-2024-11-05 test --workspace --exclude dragonos_kernel rbpf
+	RUSTFLAGS="$(RUSTFLAGS)" cargo test --workspace --exclude dragonos_kernel rbpf
 
 test-rbpf:
-	cd crates/rbpf && RUSTFLAGS="$(RUSTFLAGS)" cargo +nightly-2024-11-05 test --features=std,user,cranelift
+	cd crates/rbpf && RUSTFLAGS="$(RUSTFLAGS)" cargo test --features=std,user,cranelift
