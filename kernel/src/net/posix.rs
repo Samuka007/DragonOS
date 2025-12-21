@@ -18,6 +18,98 @@ bitflags::bitflags! {
     }
 }
 
+bitflags::bitflags! {
+    pub struct PosixSocketOptions: u32 {
+        const DEBUG = 1;
+        const REUSEADDR = 2;
+        const TYPE = 3;
+        const ERROR = 4;
+        const DONTROUTE = 5;
+        const BROADCAST = 6;
+        const SNDBUF = 7;
+        const RCVBUF = 8;
+        const KEEPALIVE = 9;
+        const OOBINLINE = 10;
+        const NO_CHECK = 11;
+        const PRIORITY = 12;
+        const LINGER = 13;
+        const BSDCOMPAT = 14;
+        const REUSEPORT = 15;
+        const PASSCRED = 16;
+        const PEERCRED = 17;
+        const RCVLOWAT = 18;
+        const SNDLOWAT = 19;
+        const RCVTIMEO = 20;
+        const SNDTIMEO = 21;
+        // ...
+    }
+}
+
+bitflags::bitflags! {
+    pub struct PosixSocketOptionLevel: u32 {
+        const SOCKET = 1;
+        const TCP = 6;
+        const UDP = 17;
+        const IPV6 = 41;
+        const ICMPV6 = 58;
+    }
+}
+
+// IP level options
+bitflags::bitflags! {
+    pub struct PosixIpSocketOptions: u32 {
+        const IP_TOS = 1;
+        const IP_TTL = 2;
+        const IP_HDRINCL = 3;
+        const IP_OPTIONS = 4;
+        const IP_ROUTER_ALERT = 5;
+        const IP_RECVOPTS = 6;
+        const IP_RETOPTS = 7;
+        const IP_PKTINFO = 8;
+        const IP_PKTOPTIONS = 9;
+        const IP_MTU_DISCOVER = 10;
+        const IP_RECVERR = 11;
+        const IP_RECVTTL = 12;
+        const IP_RECVTOS = 13;
+        const IP_MTU = 14;
+        const IP_FREEBIND = 15;
+        const IP_IPSEC_POLICY = 16;
+        const IP_XFRM_POLICY = 17;
+        const IP_PASSSEC = 18;
+        const IP_TRANSPARENT = 19;
+    }
+}
+
+// IPv6 level options
+bitflags::bitflags! {
+    pub struct PosixIpv6SocketOptions: u32 {
+        const IPV6_ADDRFORM = 1;
+        const IPV6_2292PKTINFO = 2;
+        const IPV6_2292HOPOPTS = 3;
+        const IPV6_2292DSTOPTS = 4;
+        const IPV6_2292RTHDR = 5;
+        const IPV6_2292PKTOPTIONS = 6;
+        const IPV6_CHECKSUM = 7;
+        const IPV6_2292HOPLIMIT = 8;
+        const IPV6_NEXTHOP = 9;
+        const IPV6_AUTHHDR = 10;
+        // ...
+        const IPV6_UNICAST_HOPS = 16;
+        const IPV6_MULTICAST_IF = 17;
+        const IPV6_MULTICAST_HOPS = 18;
+        const IPV6_MULTICAST_LOOP = 19;
+        const IPV6_JOIN_GROUP = 20;
+        const IPV6_LEAVE_GROUP = 21;
+        const IPV6_ROUTER_ALERT = 22;
+        const IPV6_MTU_DISCOVER = 23;
+        const IPV6_MTU = 24;
+        const IPV6_RECVERR = 25;
+        const IPV6_V6ONLY = 26;
+        const IPV6_JOIN_ANYCAST = 27;
+        const IPV6_LEAVE_ANYCAST = 28;
+    }
+}
+
 impl PosixArgsSocketType {
     #[inline(always)]
     pub fn types(&self) -> PosixArgsSocketType {
@@ -169,6 +261,12 @@ impl From<Endpoint> for SockAddr {
             Endpoint::Ip(endpoint) => Self::from(endpoint),
             Endpoint::Unix(unix_endpoint) => Self::from(unix_endpoint),
             Endpoint::Netlink(netlink_addr) => Self::from(netlink_addr),
+            Endpoint::Unspecified => SockAddr {
+                addr_ph: SockAddrPlaceholder {
+                    family: 0,
+                    data: [0; 14],
+                },
+            },
         }
     }
 }
@@ -180,10 +278,13 @@ impl SockAddr {
 
         let addr = unsafe { addr.as_ref() }.ok_or(SystemError::EFAULT)?;
         unsafe {
+            if addr.family == 0 {
+                return Ok(Endpoint::Unspecified);
+            }
             match AddressFamily::try_from(addr.family)? {
                 AddressFamily::INet => {
                     if len < addr.len()? {
-                        log::error!("len < addr.len()");
+                        // log::error!("len < addr.len()");
                         return Err(SystemError::EINVAL);
                     }
 

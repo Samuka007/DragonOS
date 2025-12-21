@@ -81,6 +81,17 @@ impl UnboundUdp {
         let (inner, address) = BoundInner::bind_ephemeral(self.socket, remote, netns)?;
         let bound_port = inner.port_manager().bind_ephemeral_port(InetTypes::Udp)?;
         let endpoint = smoltcp::wire::IpEndpoint::new(address, bound_port);
+
+        if inner
+            .with_mut::<smoltcp::socket::udp::Socket, _, _>(|socket| socket.bind(endpoint))
+            .is_err()
+        {
+            inner
+                .port_manager()
+                .unbind_port(InetTypes::Udp, bound_port);
+            return Err(SystemError::EINVAL);
+        }
+
         Ok(BoundUdp {
             inner,
             remote: SpinLock::new(Some(endpoint)),
@@ -124,6 +135,10 @@ impl BoundUdp {
 
     pub fn connect(&self, remote: smoltcp::wire::IpEndpoint) {
         self.remote.lock().replace(remote);
+    }
+
+    pub fn disconnect(&self) {
+        self.remote.lock().take();
     }
 
     #[inline]

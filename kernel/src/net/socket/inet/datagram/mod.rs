@@ -53,26 +53,41 @@ impl UdpSocket {
     }
 
     pub fn do_bind(&self, local_endpoint: smoltcp::wire::IpEndpoint) -> Result<(), SystemError> {
-        let mut inner = self.inner.write();
-        if let Some(UdpInner::Unbound(unbound)) = inner.take() {
-            let bound = unbound.bind(local_endpoint, self.netns())?;
-
-            bound
-                .inner()
-                .iface()
-                .common()
-                .bind_socket(self.self_ref.upgrade().unwrap());
-            *inner = Some(UdpInner::Bound(bound));
-            return Ok(());
+        let mut inner_guard = self.inner.write();
+        let inner = inner_guard.take().ok_or(SystemError::EBADF)?;
+        if let UdpInner::Unbound(unbound) = inner {
+            match unbound.bind(local_endpoint, self.netns()) {
+                Ok(bound) => {
+                    bound
+                        .inner()
+                        .iface()
+                        .common()
+                        .bind_socket(self.self_ref.upgrade().unwrap());
+                    *inner_guard = Some(UdpInner::Bound(bound));
+                    return Ok(());
+                }
+                Err(e) => {
+                    *inner_guard = Some(UdpInner::Unbound(UnboundUdp::new()));
+                    return Err(e);
+                }
+            }
         }
+        *inner_guard = Some(inner);
         return Err(SystemError::EINVAL);
     }
 
-    pub fn bind_emphemeral(&self, remote: smoltcp::wire::IpAddress) -> Result<(), SystemError> {
+    pub fn bind_ephemeral(&self, remote: smoltcp::wire::IpAddress) -> Result<(), SystemError> {
         let mut inner_guard = self.inner.write();
-        let bound = match inner_guard.take().expect("Udp inner is None") {
+        let inner = inner_guard.take().ok_or(SystemError::EBADF)?;
+        let bound = match inner {
             UdpInner::Bound(inner) => inner,
-            UdpInner::Unbound(inner) => inner.bind_ephemeral(remote, self.netns())?,
+            UdpInner::Unbound(unbound) => match unbound.bind_ephemeral(remote, self.netns()) {
+                Ok(bound) => bound,
+                Err(e) => {
+                    inner_guard.replace(UdpInner::Unbound(UnboundUdp::new()));
+                    return Err(e);
+                }
+            },
         };
         inner_guard.replace(UdpInner::Bound(bound));
         return Ok(());
@@ -99,13 +114,13 @@ impl UdpSocket {
         &self,
         buf: &mut [u8],
     ) -> Result<(usize, smoltcp::wire::IpEndpoint), SystemError> {
-        match self.inner.read().as_ref().expect("Udp Inner is None") {
+        match self.inner.read().as_ref().ok_or(SystemError::EBADF)? {
             UdpInner::Bound(bound) => {
                 let ret = bound.try_recv(buf);
                 bound.inner().iface().poll();
                 ret
             }
-            _ => Err(SystemError::ENOTCONN),
+            _ => Err(SystemError::EAGAIN_OR_EWOULDBLOCK),
         }
     }
 
@@ -131,20 +146,25 @@ impl UdpSocket {
         let inner = inner_guard.as_ref().ok_or(SystemError::EBADF)?;
 
         // If unbound, bind ephemeral port
-        if matches!(inner, UdpInner::Unbound(_)) {
-            let unbound = match inner_guard.take().expect("Udp Inner is None") {
+        if let UdpInner::Unbound(_) = inner {
+            let to_addr = to.ok_or(SystemError::EDESTADDRREQ)?.addr;
+            let unbound = match inner_guard.take().unwrap() {
                 UdpInner::Unbound(unbound) => unbound,
                 _ => unreachable!(),
             };
-            let bound = unbound.bind_ephemeral(
-                to.ok_or(SystemError::EDESTADDRREQ)?.addr,
-                self.netns()
-            )?;
-            inner_guard.replace(UdpInner::Bound(bound));
+            match unbound.bind_ephemeral(to_addr, self.netns()) {
+                Ok(bound) => {
+                    inner_guard.replace(UdpInner::Bound(bound));
+                }
+                Err(e) => {
+                    inner_guard.replace(UdpInner::Unbound(UnboundUdp::new()));
+                    return Err(e);
+                }
+            }
         }
 
         // Now send the data while holding the write lock
-        match inner_guard.as_ref().expect("Udp Inner is None") {
+        match inner_guard.as_ref().ok_or(SystemError::EBADF)? {
             UdpInner::Bound(bound) => {
                 let ret = bound.try_send(buf, to);
                 bound.inner().iface().poll();
@@ -172,15 +192,19 @@ impl Socket for UdpSocket {
     }
 
     fn send_buffer_size(&self) -> usize {
-        match self.inner.read().as_ref().unwrap() {
-            UdpInner::Bound(bound) => bound.with_socket(|socket| socket.payload_send_capacity()),
+        match self.inner.read().as_ref() {
+            Some(UdpInner::Bound(bound)) => {
+                bound.with_socket(|socket| socket.payload_send_capacity())
+            }
             _ => inner::DEFAULT_TX_BUF_SIZE,
         }
     }
 
     fn recv_buffer_size(&self) -> usize {
-        match self.inner.read().as_ref().unwrap() {
-            UdpInner::Bound(bound) => bound.with_socket(|socket| socket.payload_recv_capacity()),
+        match self.inner.read().as_ref() {
+            Some(UdpInner::Bound(bound)) => {
+                bound.with_socket(|socket| socket.payload_recv_capacity())
+            }
             _ => inner::DEFAULT_RX_BUF_SIZE,
         }
     }
@@ -188,14 +212,21 @@ impl Socket for UdpSocket {
     fn connect(&self, endpoint: Endpoint) -> Result<(), SystemError> {
         if let Endpoint::Ip(remote) = endpoint {
             if !self.is_bound() {
-                self.bind_emphemeral(remote.addr)?;
+                self.bind_ephemeral(remote.addr)?;
             }
-            if let UdpInner::Bound(inner) = self.inner.read().as_ref().expect("UDP Inner disappear")
-            {
+            if let Some(UdpInner::Bound(inner)) = self.inner.read().as_ref() {
                 inner.connect(remote);
                 return Ok(());
             } else {
-                panic!("");
+                return Err(SystemError::EBADF);
+            }
+        } else if let Endpoint::Unspecified = endpoint {
+            if let Some(UdpInner::Bound(inner)) = self.inner.read().as_ref() {
+                inner.disconnect();
+                return Ok(());
+            } else {
+                // Not connected, but not bound either - still valid to disconnect (no-op)
+                return Ok(());
             }
         }
         return Err(SystemError::EAFNOSUPPORT);
@@ -270,7 +301,7 @@ impl Socket for UdpSocket {
     }
 
     fn remote_endpoint(&self) -> Result<Endpoint, SystemError> {
-        match self.inner.read().as_ref().unwrap() {
+        match self.inner.read().as_ref().ok_or(SystemError::EBADF)? {
             UdpInner::Bound(bound) => Ok(Endpoint::Ip(bound.remote_endpoint()?)),
             // TODO: IPv6 support
             _ => Err(SystemError::ENOTCONN),
@@ -279,11 +310,27 @@ impl Socket for UdpSocket {
 
     fn local_endpoint(&self) -> Result<Endpoint, SystemError> {
         use smoltcp::wire::{IpAddress::*, IpEndpoint, IpListenEndpoint};
-        match self.inner.read().as_ref().unwrap() {
+        match self.inner.read().as_ref().ok_or(SystemError::EBADF)? {
             UdpInner::Bound(bound) => {
                 let IpListenEndpoint { addr, port } = bound.endpoint();
+                // If bound to 0.0.0.0 (unspecified) but connected to a remote peer (e.g. 127.0.0.1),
+                // we should return the specific interface address we are using (e.g. 127.0.0.1).
+                // TODO: Query routing table to find exact outgoing interface address.
+                // For now, if connected to loopback, assume we are on loopback.
+                let mut local_addr = addr.unwrap_or(Ipv4([0, 0, 0, 0].into()));
+                if local_addr.is_unspecified() {
+                    if let Ok(remote) = bound.remote_endpoint() {
+                         match remote.addr {
+                            Ipv4(addr) if addr.is_loopback() => {
+                                local_addr = Ipv4([127, 0, 0, 1].into());
+                            }
+                            _ => {}
+                         }
+                    }
+                }
+
                 Ok(Endpoint::Ip(IpEndpoint::new(
-                    addr.unwrap_or(Ipv4([0, 0, 0, 0].into())),
+                    local_addr,
                     port,
                 )))
             }
@@ -316,13 +363,83 @@ impl Socket for UdpSocket {
         &self.fasync_items
     }
 
+    fn option(&self, level: crate::net::socket::PSOL, name: usize, value: &mut [u8]) -> Result<usize, SystemError> {
+        use crate::net::posix::{PosixIpSocketOptions, PosixIpv6SocketOptions};
+        use crate::net::socket::PSOL;
+
+        match level {
+            PSOL::IP => {
+                if let Some(name) = PosixIpSocketOptions::from_bits(name as u32) {
+                    if name.contains(PosixIpSocketOptions::IP_RECVERR) {
+                         // TODO: Actual implementation
+                         // For now, return 0 to indicate it's disabled (default)
+                         if value.len() < 4 {
+                            return Err(SystemError::EINVAL);
+                         }
+                         value[0..4].copy_from_slice(&0u32.to_ne_bytes());
+                         return Ok(4);
+                    }
+                } else {
+                    return Err(SystemError::ENOPROTOOPT);
+                }
+            }
+            PSOL::IPV6 => {
+                if let Some(name) = PosixIpv6SocketOptions::from_bits(name as u32) {
+                    if name.contains(PosixIpv6SocketOptions::IPV6_RECVERR) {
+                         // TODO: Actual implementation
+                         // For now, return 0 to indicate it's disabled (default)
+                         if value.len() < 4 {
+                            return Err(SystemError::EINVAL);
+                         }
+                         value[0..4].copy_from_slice(&0u32.to_ne_bytes());
+                         return Ok(4);
+                    }
+                } else {
+                    return Err(SystemError::ENOPROTOOPT);
+                }
+            }
+            _ => return Err(SystemError::ENOSYS),
+        }
+        Err(SystemError::ENOSYS)
+    }
+
+    fn set_option(&self, level: crate::net::socket::PSOL, name: usize, _value: &[u8]) -> Result<(), SystemError> {
+        use crate::net::posix::{PosixIpSocketOptions, PosixIpv6SocketOptions};
+        use crate::net::socket::PSOL;
+        match level {
+            PSOL::IP => {
+                if let Some(name) = PosixIpSocketOptions::from_bits(name as u32) {
+                    if name.contains(PosixIpSocketOptions::IP_RECVERR) {
+                         // TODO: Actual implementation
+                         // Accept the setting but warn it's a stub
+                         return Ok(());
+                    }
+                } else {
+                    return Err(SystemError::ENOPROTOOPT);
+                }
+            }
+            PSOL::IPV6 => {
+                if let Some(name) = PosixIpv6SocketOptions::from_bits(name as u32) {
+                    if name.contains(PosixIpv6SocketOptions::IPV6_RECVERR) {
+                         // TODO: Actual implementation
+                         // Accept the setting but warn it's a stub
+                         return Ok(());
+                    }
+                } else {
+                    return Err(SystemError::ENOPROTOOPT);
+                }
+            }
+            _ => return Err(SystemError::ENOSYS),
+        }
+        Err(SystemError::ENOSYS)
+    }
     fn check_io_event(&self) -> EPollEventType {
         let mut event = EPollEventType::empty();
-        match self.inner.read().as_ref().unwrap() {
-            UdpInner::Unbound(_) => {
+        match self.inner.read().as_ref() {
+            Some(UdpInner::Unbound(_)) => {
                 event.insert(EP::EPOLLOUT | EP::EPOLLWRNORM | EP::EPOLLWRBAND);
             }
-            UdpInner::Bound(bound) => {
+            Some(UdpInner::Bound(bound)) => {
                 let (can_recv, can_send) =
                     bound.with_socket(|socket| (socket.can_recv(), socket.can_send()));
 
@@ -333,6 +450,9 @@ impl Socket for UdpSocket {
                 if can_send {
                     event.insert(EP::EPOLLOUT | EP::EPOLLWRNORM | EP::EPOLLWRBAND);
                 }
+            }
+            None => {
+                event.insert(EP::EPOLLERR | EP::EPOLLHUP);
             }
         }
         return event;

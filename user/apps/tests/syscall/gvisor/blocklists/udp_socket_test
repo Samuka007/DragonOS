@@ -4,27 +4,8 @@ UdpInet6SocketTest.ConnectInet4Sockaddr
 # **.Creation
 # **.Getsockname
 # **.Getpeername
-**.SendNotConnected/**
-**.ConnectBinds/**
-**.ReceiveNotBound/**
-**.Bind/**
-**.BindInUse/**
 **.ConnectWriteToInvalidPort/**
-**.ConnectSimultaneousWriteToInvalidPort/**
-**.ReceiveAfterConnect/**
 **.ReceiveAfterDisconnect/**
-**.Connect/**
-**.ConnectAnyZero/**
-**.ConnectAnyWithPort/**
-**.DisconnectAfterConnectAny/**
-**.DisconnectAfterConnectAnyWithPort/**
-**.DisconnectAfterBind/**
-**.DisconnectAfterBindToUnspecAndConnect/**
-**.DisconnectAfterConnectWithoutBind/**
-**.BindToAnyConnnectToLocalhost/**
-**.DisconnectAfterBindToAny/**
-**.Disconnect/**
-**.ConnectBadAddress/**
 **.SendToAddressOtherThanConnected/**
 **.ConnectAndSendNoReceiver/**
 **.RecvErrorConnRefusedOtherAFSockOpt/**

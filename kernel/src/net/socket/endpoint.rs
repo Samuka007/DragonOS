@@ -18,6 +18,8 @@ pub enum Endpoint {
     Unix(UnixEndpoint),
     /// Netlink端点
     Netlink(NetlinkSocketAddr),
+    /// Unspecified endpoint (AF_UNSPEC) - used for disconnecting sockets
+    Unspecified,
 }
 
 /// @brief 链路层端点
