@@ -125,27 +125,33 @@ impl UdpSocket {
         buf: &[u8],
         to: Option<smoltcp::wire::IpEndpoint>,
     ) -> Result<usize, SystemError> {
-        {
-            let mut inner_guard = self.inner.write();
-            let inner = match inner_guard.take().expect("Udp Inner is None") {
-                // TODO: 此处会为空，需要DEBUG
-                UdpInner::Bound(bound) => bound,
-                UdpInner::Unbound(unbound) => unbound
-                    .bind_ephemeral(to.ok_or(SystemError::EDESTADDRREQ)?.addr, self.netns())?,
+        let mut inner_guard = self.inner.write();
+
+        // Check if socket is closed
+        let inner = inner_guard.as_ref().ok_or(SystemError::EBADF)?;
+
+        // If unbound, bind ephemeral port
+        if matches!(inner, UdpInner::Unbound(_)) {
+            let unbound = match inner_guard.take().expect("Udp Inner is None") {
+                UdpInner::Unbound(unbound) => unbound,
+                _ => unreachable!(),
             };
-            // size = inner.try_send(buf, to)?;
-            inner_guard.replace(UdpInner::Bound(inner));
-        };
-        // Optimize: 拿两次锁的平均效率是否比一次长时间的读锁效率要高？
-        let result = match self.inner.read().as_ref().expect("Udp Inner is None") {
+            let bound = unbound.bind_ephemeral(
+                to.ok_or(SystemError::EDESTADDRREQ)?.addr,
+                self.netns()
+            )?;
+            inner_guard.replace(UdpInner::Bound(bound));
+        }
+
+        // Now send the data while holding the write lock
+        match inner_guard.as_ref().expect("Udp Inner is None") {
             UdpInner::Bound(bound) => {
                 let ret = bound.try_send(buf, to);
                 bound.inner().iface().poll();
                 ret
             }
             _ => Err(SystemError::ENOTCONN),
-        };
-        return result;
+        }
     }
 
     pub fn netns(&self) -> Arc<NetNamespace> {
