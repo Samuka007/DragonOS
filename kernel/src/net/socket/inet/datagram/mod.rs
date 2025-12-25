@@ -54,18 +54,36 @@ impl UdpSocket {
 
     pub fn do_bind(&self, local_endpoint: smoltcp::wire::IpEndpoint) -> Result<(), SystemError> {
         let mut inner = self.inner.write();
-        if let Some(UdpInner::Unbound(unbound)) = inner.take() {
-            let bound = unbound.bind(local_endpoint, self.netns())?;
 
-            bound
-                .inner()
-                .iface()
-                .common()
-                .bind_socket(self.self_ref.upgrade().unwrap());
-            *inner = Some(UdpInner::Bound(bound));
-            return Ok(());
+        // Check socket state first without taking
+        match inner.as_ref() {
+            None => return Err(SystemError::EBADF),
+            Some(UdpInner::Bound(_)) => return Err(SystemError::EINVAL), // Already bound
+            Some(UdpInner::Unbound(_)) => {}
         }
-        return Err(SystemError::EINVAL);
+
+        // Now safe to take - we know it's Unbound
+        let unbound = match inner.take() {
+            Some(UdpInner::Unbound(unbound)) => unbound,
+            _ => unreachable!(),
+        };
+
+        match unbound.bind(local_endpoint, self.netns()) {
+            Ok(bound) => {
+                bound
+                    .inner()
+                    .iface()
+                    .common()
+                    .bind_socket(self.self_ref.upgrade().unwrap());
+                *inner = Some(UdpInner::Bound(bound));
+                Ok(())
+            }
+            Err(e) => {
+                // Restore unbound state on error
+                *inner = Some(UdpInner::Unbound(UnboundUdp::new()));
+                Err(e)
+            }
+        }
     }
 
     pub fn bind_ephemeral(&self, remote: smoltcp::wire::IpAddress) -> Result<(), SystemError> {
@@ -108,11 +126,12 @@ impl UdpSocket {
     ) -> Result<(usize, smoltcp::wire::IpEndpoint), SystemError> {
         match self.inner.read().as_ref().ok_or(SystemError::EBADF)? {
             UdpInner::Bound(bound) => {
-                let ret = bound.try_recv(buf);
+                // Poll BEFORE try_recv to receive any pending packets
                 bound.inner().iface().poll();
-                ret
+                bound.try_recv(buf)
             }
-            _ => Err(SystemError::ENOTCONN),
+            // UDP is connectionless - unbound socket just has no data yet
+            UdpInner::Unbound(_) => Err(SystemError::EAGAIN_OR_EWOULDBLOCK),
         }
     }
 
@@ -203,20 +222,33 @@ impl Socket for UdpSocket {
     }
 
     fn connect(&self, endpoint: Endpoint) -> Result<(), SystemError> {
-        if let Endpoint::Ip(remote) = endpoint {
-            if !self.is_bound() {
-                self.bind_ephemeral(remote.addr)?;
-            }
-            match self.inner.read().as_ref() {
-                Some(UdpInner::Bound(inner)) => {
-                    inner.connect(remote);
-                    return Ok(());
+        match endpoint {
+            Endpoint::Ip(remote) => {
+                if !self.is_bound() {
+                    self.bind_ephemeral(remote.addr)?;
                 }
-                Some(_) => return Err(SystemError::ENOTCONN),
-                None => return Err(SystemError::EBADF),
+                match self.inner.read().as_ref() {
+                    Some(UdpInner::Bound(inner)) => {
+                        inner.connect(remote);
+                        Ok(())
+                    }
+                    Some(_) => Err(SystemError::ENOTCONN),
+                    None => Err(SystemError::EBADF),
+                }
             }
+            Endpoint::Unspecified => {
+                // AF_UNSPEC: disconnect the UDP socket (clear remote endpoint)
+                match self.inner.read().as_ref() {
+                    Some(UdpInner::Bound(inner)) => {
+                        inner.disconnect();
+                        Ok(())
+                    }
+                    Some(UdpInner::Unbound(_)) => Ok(()), // Already disconnected
+                    None => Err(SystemError::EBADF),
+                }
+            }
+            _ => Err(SystemError::EAFNOSUPPORT),
         }
-        Err(SystemError::EAFNOSUPPORT)
     }
 
     fn send(&self, buffer: &[u8], flags: PMSG) -> Result<usize, SystemError> {
@@ -367,7 +399,8 @@ impl Socket for UdpSocket {
 
 impl InetSocket for UdpSocket {
     fn on_iface_events(&self) {
-        return;
+        // Wake up any threads waiting on this socket
+        self.wait_queue.wakeup_all(None);
     }
 }
 

@@ -142,6 +142,10 @@ impl BoundUdp {
         self.remote.lock().replace(remote);
     }
 
+    pub fn disconnect(&self) {
+        self.remote.lock().take();
+    }
+
     #[inline]
     pub fn try_recv(
         &self,

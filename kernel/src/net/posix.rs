@@ -165,6 +165,12 @@ impl From<NetlinkSocketAddr> for SockAddr {
 impl From<Endpoint> for SockAddr {
     fn from(value: Endpoint) -> Self {
         match value {
+            Endpoint::Unspecified => Self {
+                addr_ph: SockAddrPlaceholder {
+                    family: 0, // AF_UNSPEC
+                    data: [0; 14],
+                },
+            },
             Endpoint::LinkLayer(_link_layer_endpoint) => todo!(),
             Endpoint::Ip(endpoint) => Self::from(endpoint),
             Endpoint::Unix(unix_endpoint) => Self::from(unix_endpoint),
@@ -283,6 +289,10 @@ impl SockAddr {
                         nl_pid,
                         GroupIdSet::new(nl_groups),
                     )))
+                }
+                AddressFamily::Unspecified => {
+                    // AF_UNSPEC is used to disconnect UDP sockets
+                    Ok(Endpoint::Unspecified)
                 }
                 _ => {
                     log::warn!("not support address family {:?}", addr.family);

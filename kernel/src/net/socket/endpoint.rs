@@ -10,6 +10,8 @@ pub use smoltcp::wire::IpEndpoint;
 
 #[derive(Debug, Clone)]
 pub enum Endpoint {
+    /// 未指定端点 (AF_UNSPEC) - 用于UDP断开连接
+    Unspecified,
     /// 链路层端点
     LinkLayer(LinkLayerEndpoint),
     /// 网络层端点
