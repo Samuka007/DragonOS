@@ -77,13 +77,29 @@ impl UnboundUdp {
         remote: smoltcp::wire::IpAddress,
         netns: Arc<NetNamespace>,
     ) -> Result<BoundUdp, SystemError> {
-        // let (addr, port) = (remote.addr, remote.port);
-        let (inner, address) = BoundInner::bind_ephemeral(self.socket, remote, netns)?;
+        let (inner, local_addr) = BoundInner::bind_ephemeral(self.socket, remote, netns)?;
         let bound_port = inner.port_manager().bind_ephemeral_port(InetTypes::Udp)?;
-        let endpoint = smoltcp::wire::IpEndpoint::new(address, bound_port);
+
+        // Bind the smoltcp socket to the local endpoint
+        if local_addr.is_unspecified() {
+            if inner
+                .with_mut::<smoltcp::socket::udp::Socket, _, _>(|socket| socket.bind(bound_port))
+                .is_err()
+            {
+                return Err(SystemError::EINVAL);
+            }
+        } else if inner
+            .with_mut::<smoltcp::socket::udp::Socket, _, _>(|socket| {
+                socket.bind(smoltcp::wire::IpEndpoint::new(local_addr, bound_port))
+            })
+            .is_err()
+        {
+            return Err(SystemError::EINVAL);
+        }
+
         Ok(BoundUdp {
             inner,
-            remote: SpinLock::new(Some(endpoint)),
+            remote: SpinLock::new(None),
         })
     }
 }
