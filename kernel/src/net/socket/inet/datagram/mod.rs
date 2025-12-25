@@ -151,39 +151,48 @@ impl UdpSocket {
         buf: &[u8],
         to: Option<smoltcp::wire::IpEndpoint>,
     ) -> Result<usize, SystemError> {
-        let mut inner_guard = self.inner.write();
+        // Send data and get iface reference, then release lock before polling
+        let (result, iface) = {
+            let mut inner_guard = self.inner.write();
 
-        // Check if socket is closed
-        let inner = inner_guard.as_ref().ok_or(SystemError::EBADF)?;
+            // Check if socket is closed
+            let inner = inner_guard.as_ref().ok_or(SystemError::EBADF)?;
 
-        // If unbound, bind to ephemeral port
-        if let UdpInner::Unbound(_) = inner {
-            let to_addr = to.ok_or(SystemError::EDESTADDRREQ)?.addr;
-            let unbound = match inner_guard.take().unwrap() {
-                UdpInner::Unbound(unbound) => unbound,
-                _ => unreachable!(),
-            };
-            match unbound.bind_ephemeral(to_addr, self.netns()) {
-                Ok(bound) => {
-                    inner_guard.replace(UdpInner::Bound(bound));
-                }
-                Err(e) => {
-                    // Restore unbound state on error
-                    inner_guard.replace(UdpInner::Unbound(UnboundUdp::new()));
-                    return Err(e);
+            // If unbound, bind to ephemeral port
+            if let UdpInner::Unbound(_) = inner {
+                let to_addr = to.ok_or(SystemError::EDESTADDRREQ)?.addr;
+                let unbound = match inner_guard.take().unwrap() {
+                    UdpInner::Unbound(unbound) => unbound,
+                    _ => unreachable!(),
+                };
+                match unbound.bind_ephemeral(to_addr, self.netns()) {
+                    Ok(bound) => {
+                        inner_guard.replace(UdpInner::Bound(bound));
+                    }
+                    Err(e) => {
+                        // Restore unbound state on error
+                        inner_guard.replace(UdpInner::Unbound(UnboundUdp::new()));
+                        return Err(e);
+                    }
                 }
             }
-        }
 
-        // Send data while still holding the write lock
-        match inner_guard.as_ref().ok_or(SystemError::EBADF)? {
-            UdpInner::Bound(bound) => {
-                let ret = bound.try_send(buf, to);
-                bound.inner().iface().poll();
-                ret
+            // Send data and get iface Arc before releasing lock
+            match inner_guard.as_ref().ok_or(SystemError::EBADF)? {
+                UdpInner::Bound(bound) => {
+                    let ret = bound.try_send(buf, to);
+                    let iface = bound.inner().iface().clone();
+                    (ret, iface)
+                }
+                _ => return Err(SystemError::ENOTCONN),
             }
-            _ => Err(SystemError::ENOTCONN),
-        }
+        }; // Lock released here
+
+        // Poll AFTER releasing the lock to avoid deadlock
+        // when socket sends to itself on loopback
+        iface.poll();
+
+        result
     }
 
     pub fn netns(&self) -> Arc<NetNamespace> {
@@ -272,7 +281,7 @@ impl Socket for UdpSocket {
     }
 
     fn recv(&self, buffer: &mut [u8], flags: PMSG) -> Result<usize, SystemError> {
-        return if self.is_nonblock() || flags.contains(PMSG::DONTWAIT) {
+        if self.is_nonblock() || flags.contains(PMSG::DONTWAIT) {
             self.try_recv(buffer)
         } else {
             loop {
@@ -284,7 +293,7 @@ impl Socket for UdpSocket {
                 }
             }
         }
-        .map(|(len, _)| len);
+        .map(|(len, _)| len)
     }
 
     fn recv_from(

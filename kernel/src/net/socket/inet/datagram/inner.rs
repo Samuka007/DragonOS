@@ -151,13 +151,41 @@ impl BoundUdp {
         &self,
         buf: &mut [u8],
     ) -> Result<(usize, smoltcp::wire::IpEndpoint), SystemError> {
+        let remote = *self.remote.lock();
+
         self.with_mut_socket(|socket| {
-            if socket.can_recv() {
-                if let Ok((size, metadata)) = socket.recv_slice(buf) {
-                    return Ok((size, metadata.endpoint));
+            // If connected, filter packets by source address
+            if let Some(expected_remote) = remote {
+                // Loop to skip packets from unexpected sources
+                loop {
+                    if !socket.can_recv() {
+                        return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
+                    }
+
+                    // Peek to check source address before receiving
+                    if let Ok((_size, metadata)) = socket.peek_slice(buf) {
+                        if metadata.endpoint == expected_remote {
+                            // Source matches, receive the packet
+                            if let Ok((size, metadata)) = socket.recv_slice(buf) {
+                                return Ok((size, metadata.endpoint));
+                            }
+                        } else {
+                            // Source doesn't match, discard this packet and check next
+                            let _ = socket.recv_slice(buf);
+                            continue;
+                        }
+                    }
+                    return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
                 }
+            } else {
+                // Not connected, receive from any source
+                if socket.can_recv() {
+                    if let Ok((size, metadata)) = socket.recv_slice(buf) {
+                        return Ok((size, metadata.endpoint));
+                    }
+                }
+                return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
             }
-            return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
         })
     }
 
