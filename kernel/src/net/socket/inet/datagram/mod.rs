@@ -383,6 +383,13 @@ impl Socket for UdpSocket {
             self.try_recv(buffer)
         } else {
             loop {
+                // Re-check shutdown state inside the loop in case shutdown was called
+                // while we were blocked
+                let shutdown_bits = self.shutdown.load(Ordering::Acquire);
+                if shutdown_bits & 0x01 != 0 {
+                    return Ok(0);
+                }
+
                 match self.try_recv(buffer) {
                     Err(SystemError::EAGAIN_OR_EWOULDBLOCK) => {
                         wq_wait_event_interruptible!(self.wait_queue, self.can_recv(), {})?;
@@ -400,6 +407,21 @@ impl Socket for UdpSocket {
         flags: PMSG,
         address: Option<Endpoint>,
     ) -> Result<(usize, Endpoint), SystemError> {
+        // Check if read is shutdown - for recvfrom, we need to return an error
+        // but we can't return (0, endpoint) without a valid endpoint, so we return EAGAIN
+        // However, if the socket is connected, we can get the remote endpoint
+        let shutdown_bits = self.shutdown.load(Ordering::Acquire);
+        if shutdown_bits & 0x01 != 0 {
+            // If connected, we can return (0, remote_endpoint) like EOF
+            if let Some(UdpInner::Bound(bound)) = self.inner.read().as_ref() {
+                if let Ok(remote) = bound.remote_endpoint() {
+                    return Ok((0, Endpoint::Ip(remote)));
+                }
+            }
+            // Not connected, can't provide endpoint, return error
+            return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
+        }
+
         // could block io
         if let Some(endpoint) = address {
             self.connect(endpoint)?;
@@ -409,6 +431,19 @@ impl Socket for UdpSocket {
             self.try_recv(buffer)
         } else {
             loop {
+                // Re-check shutdown state inside the loop in case shutdown was called
+                // while we were blocked
+                let shutdown_bits = self.shutdown.load(Ordering::Acquire);
+                if shutdown_bits & 0x01 != 0 {
+                    // If connected, return EOF with remote endpoint
+                    if let Some(UdpInner::Bound(bound)) = self.inner.read().as_ref() {
+                        if let Ok(remote) = bound.remote_endpoint() {
+                            return Ok((0, Endpoint::Ip(remote)));
+                        }
+                    }
+                    return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
+                }
+
                 match self.try_recv(buffer) {
                     Err(SystemError::EAGAIN_OR_EWOULDBLOCK) => {
                         wq_wait_event_interruptible!(self.wait_queue, self.can_recv(), {})?;
@@ -427,20 +462,18 @@ impl Socket for UdpSocket {
     }
 
     fn shutdown(&self, how: ShutdownBit) -> Result<(), SystemError> {
-        // For UDP, SHUT_WR requires the socket to be connected
-        if how.is_send_shutdown() || how.is_both_shutdown() {
-            // Check if socket is connected
-            match self.inner.read().as_ref() {
-                Some(UdpInner::Bound(bound)) => {
-                    if bound.remote_endpoint().is_err() {
-                        return Err(SystemError::ENOTCONN);
-                    }
-                }
-                Some(UdpInner::Unbound(_)) => {
+        // For UDP, shutdown requires the socket to be connected (both SHUT_RD and SHUT_WR)
+        // Check if socket is connected
+        match self.inner.read().as_ref() {
+            Some(UdpInner::Bound(bound)) => {
+                if bound.remote_endpoint().is_err() {
                     return Err(SystemError::ENOTCONN);
                 }
-                None => return Err(SystemError::EBADF),
             }
+            Some(UdpInner::Unbound(_)) => {
+                return Err(SystemError::ENOTCONN);
+            }
+            None => return Err(SystemError::EBADF),
         }
 
         // Set the shutdown bits atomically
@@ -457,6 +490,9 @@ impl Socket for UdpSocket {
             how.is_recv_shutdown(),
             how.is_send_shutdown()
         );
+
+        // Wake up any threads blocked in recv() or send() so they can check the shutdown state
+        self.wait_queue.wakeup_all(None);
 
         Ok(())
     }
