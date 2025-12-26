@@ -6,12 +6,12 @@ use crate::filesystem::epoll::EPollEventType;
 use crate::filesystem::vfs::{fasync::FAsyncItems, vcore::generate_inode_id, InodeId};
 use crate::libs::wait_queue::WaitQueue;
 use crate::net::socket::common::{EPollItems, ShutdownBit};
-use crate::net::socket::{Socket, PMSG};
+use crate::net::socket::{Socket, PSO, PMSG, PSOL};
 use crate::process::namespace::net_namespace::NetNamespace;
 use crate::process::ProcessManager;
 use crate::{libs::rwlock::RwLock, net::socket::endpoint::Endpoint};
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use super::InetSocket;
 
@@ -32,6 +32,10 @@ pub struct UdpSocket {
     netns: Arc<NetNamespace>,
     epoll_items: EPollItems,
     fasync_items: FAsyncItems,
+    /// Custom send buffer size (SO_SNDBUF), 0 means use default
+    send_buf_size: AtomicUsize,
+    /// Custom receive buffer size (SO_RCVBUF), 0 means use default
+    recv_buf_size: AtomicUsize,
 }
 
 impl UdpSocket {
@@ -47,6 +51,8 @@ impl UdpSocket {
             netns,
             epoll_items: EPollItems::default(),
             fasync_items: FAsyncItems::default(),
+            send_buf_size: AtomicUsize::new(0), // 0 means use default
+            recv_buf_size: AtomicUsize::new(0), // 0 means use default
         })
     }
 
@@ -263,6 +269,33 @@ impl Socket for UdpSocket {
     fn connect(&self, endpoint: Endpoint) -> Result<(), SystemError> {
         match endpoint {
             Endpoint::Ip(remote) => {
+                // Port 0 is treated as disconnect (like AF_UNSPEC)
+                // This matches Linux behavior where connect() to port 0 succeeds but disconnects the socket
+                if remote.port == 0 {
+                    log::debug!("UDP connect: port 0 treated as disconnect");
+                    // Disconnect logic - same as AF_UNSPEC case
+                    let should_unbind = {
+                        match self.inner.read().as_ref() {
+                            Some(UdpInner::Bound(inner)) => {
+                                inner.disconnect();
+                                inner.should_unbind_on_disconnect()
+                            }
+                            Some(UdpInner::Unbound(_)) => return Ok(()), // Already disconnected
+                            None => return Err(SystemError::EBADF),
+                        }
+                    };
+
+                    if should_unbind {
+                        // Socket was implicitly bound by connect, unbind it
+                        let mut inner_guard = self.inner.write();
+                        if let Some(UdpInner::Bound(bound)) = inner_guard.take() {
+                            bound.close();
+                            inner_guard.replace(UdpInner::Unbound(UnboundUdp::new()));
+                        }
+                    }
+                    return Ok(());
+                }
+
                 if !self.is_bound() {
                     self.bind_ephemeral(remote.addr)?;
                 }
@@ -304,6 +337,10 @@ impl Socket for UdpSocket {
     }
 
     fn send(&self, buffer: &[u8], flags: PMSG) -> Result<usize, SystemError> {
+        if buffer.len() == 0 {
+            log::info!("UDP send() called with ZERO-LENGTH buffer");
+        }
+
         // Check if write is shutdown (0x02 = SEND_SHUTDOWN)
         let shutdown_bits = self.shutdown.load(Ordering::Acquire);
         if shutdown_bits & 0x02 != 0 {
@@ -424,6 +461,42 @@ impl Socket for UdpSocket {
         Ok(())
     }
 
+    fn set_option(&self, level: PSOL, name: usize, val: &[u8]) -> Result<(), SystemError> {
+        if level == PSOL::SOCKET {
+            let opt = PSO::try_from(name as u32).map_err(|_| SystemError::ENOPROTOOPT)?;
+            match opt {
+                PSO::SNDBUF => {
+                    // Set send buffer size
+                    if val.len() < core::mem::size_of::<u32>() {
+                        return Err(SystemError::EINVAL);
+                    }
+                    let size = u32::from_ne_bytes([val[0], val[1], val[2], val[3]]) as usize;
+                    // Linux doubles the requested size and enforces a minimum
+                    // We'll store the requested size and let smoltcp use it when creating sockets
+                    self.send_buf_size.store(size, Ordering::Release);
+                    log::debug!("UDP setsockopt SO_SNDBUF: {}", size);
+                    return Ok(());
+                }
+                PSO::RCVBUF => {
+                    // Set receive buffer size
+                    if val.len() < core::mem::size_of::<u32>() {
+                        return Err(SystemError::EINVAL);
+                    }
+                    let size = u32::from_ne_bytes([val[0], val[1], val[2], val[3]]) as usize;
+                    // Linux doubles the requested size and enforces a minimum
+                    // We'll store the requested size and let smoltcp use it when creating sockets
+                    self.recv_buf_size.store(size, Ordering::Release);
+                    log::debug!("UDP setsockopt SO_RCVBUF: {}", size);
+                    return Ok(());
+                }
+                _ => {
+                    return Err(SystemError::ENOPROTOOPT);
+                }
+            }
+        }
+        Err(SystemError::ENOPROTOOPT)
+    }
+
     fn remote_endpoint(&self) -> Result<Endpoint, SystemError> {
         match self.inner.read().as_ref() {
             Some(UdpInner::Bound(bound)) => Ok(Endpoint::Ip(bound.remote_endpoint()?)),
@@ -437,10 +510,29 @@ impl Socket for UdpSocket {
         match self.inner.read().as_ref() {
             Some(UdpInner::Bound(bound)) => {
                 let IpListenEndpoint { addr, port } = bound.endpoint();
-                Ok(Endpoint::Ip(IpEndpoint::new(
-                    addr.unwrap_or(Ipv4([0, 0, 0, 0].into())),
-                    port,
-                )))
+
+                // If bound to "any" address (0.0.0.0 or ::), but connected to a specific address,
+                // return the actual local address that would be used for the connection
+                let local_addr = if addr.is_none() {
+                    // Check if socket is connected
+                    if let Ok(remote) = bound.remote_endpoint() {
+                        // Use the same address type as the remote
+                        // For loopback connections, use loopback address
+                        match remote.addr {
+                            Ipv4(ipv4) if ipv4.is_loopback() => Ipv4([127, 0, 0, 1].into()),
+                            Ipv6(ipv6) if ipv6.is_loopback() => Ipv6([0, 0, 0, 0, 0, 0, 0, 1].into()),
+                            Ipv4(_) => Ipv4([0, 0, 0, 0].into()), // Still return "any" for non-loopback
+                            Ipv6(_) => Ipv6([0, 0, 0, 0, 0, 0, 0, 0].into()),
+                        }
+                    } else {
+                        // Not connected, return "any"
+                        Ipv4([0, 0, 0, 0].into())
+                    }
+                } else {
+                    addr.unwrap()
+                };
+
+                Ok(Endpoint::Ip(IpEndpoint::new(local_addr, port)))
             }
             Some(_) => Ok(Endpoint::Ip(IpEndpoint::new(Ipv4([0, 0, 0, 0].into()), 0))),
             None => Err(SystemError::EBADF),

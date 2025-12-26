@@ -242,13 +242,19 @@ impl Syscall {
     ///
     /// @return 成功返回0，失败返回错误码
     pub fn bind(fd: usize, addr: *const SockAddr, addrlen: u32) -> Result<usize, SystemError> {
-        // 打印收到的参数
-        // log::debug!(
-        //     "bind: fd={:?}, family={:?}, addrlen={:?}",
-        //     fd,
-        //     (unsafe { addr.as_ref().unwrap().family }),
-        //     addrlen
-        // );
+        // Check for AF_UNSPEC bind - allowed for Linux compatibility but is a no-op
+        // See: https://github.com/torvalds/linux/commit/29c486df6a208432b370bd4be99ae1369ede28d8
+        unsafe {
+            let addr_ref = addr.as_ref().ok_or(SystemError::EFAULT)?;
+            if let Ok(family) = socket::AddressFamily::try_from(addr_ref.family) {
+                if family == socket::AddressFamily::Unspecified {
+                    // AF_UNSPEC bind is allowed for compatibility but does nothing
+                    log::debug!("bind: AF_UNSPEC bind allowed for compatibility");
+                    return Ok(0);
+                }
+            }
+        }
+
         let endpoint: Endpoint = SockAddr::to_endpoint(addr, addrlen)?;
         ProcessManager::current_pcb()
             .get_socket_inode(fd as i32)?

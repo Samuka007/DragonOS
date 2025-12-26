@@ -203,8 +203,18 @@ impl BoundUdp {
         buf: &[u8],
         to: Option<smoltcp::wire::IpEndpoint>,
     ) -> Result<usize, SystemError> {
+        if buf.len() == 0 {
+            log::info!("UDP try_send: ZERO-LENGTH packet requested");
+        }
+
         let connected_remote = *self.remote.lock();
         let mut remote = to.or(connected_remote).ok_or(SystemError::ENOTCONN)?;
+
+        // Validate port - sending to port 0 is invalid
+        if remote.port == 0 {
+            log::warn!("UDP try_send: attempted to send to port 0");
+            return Err(SystemError::EINVAL);
+        }
 
         // Linux treats sending to 0.0.0.0 (INADDR_ANY) as sending to localhost
         // smoltcp rejects it as "Unaddressable", so we translate it here
@@ -226,12 +236,22 @@ impl BoundUdp {
             log::debug!("UDP try_send: can_send={}", can_send);
 
             if can_send {
+                if buf.len() == 0 {
+                    log::info!("UDP try_send: Attempting to send zero-length packet via smoltcp");
+                }
                 match socket.send_slice(buf, remote) {
                     Ok(_) => {
-                        log::debug!("UDP send {} bytes to {:?} OK", buf.len(), remote);
+                        if buf.len() == 0 {
+                            log::info!("UDP send ZERO-LENGTH packet to {:?} OK", remote);
+                        } else {
+                            log::debug!("UDP send {} bytes to {:?} OK", buf.len(), remote);
+                        }
                         return Ok(buf.len());
                     }
                     Err(e) => {
+                        if buf.len() == 0 {
+                            log::error!("UDP send_slice FAILED for ZERO-LENGTH packet: {:?}", e);
+                        }
                         log::warn!("UDP send_slice failed: {:?}", e);
                         return Err(SystemError::ENOBUFS);
                     }

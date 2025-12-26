@@ -245,6 +245,9 @@ impl<T: Socket + 'static> IndexNode for T {
         buf: &[u8],
         data: SpinLockGuard<FilePrivateData>,
     ) -> Result<usize, SystemError> {
+        if buf.len() == 0 {
+            log::info!("Socket write_at: ZERO-LENGTH write, buf.len()={}, _len={}", buf.len(), _len);
+        }
         drop(data);
         self.write(buf)
     }
