@@ -69,6 +69,7 @@ impl UnboundUdp {
         Ok(BoundUdp {
             inner,
             remote: SpinLock::new(None),
+            explicitly_bound: true,
         })
     }
 
@@ -100,6 +101,7 @@ impl UnboundUdp {
         Ok(BoundUdp {
             inner,
             remote: SpinLock::new(None),
+            explicitly_bound: false,
         })
     }
 }
@@ -108,6 +110,8 @@ impl UnboundUdp {
 pub struct BoundUdp {
     inner: BoundInner,
     remote: SpinLock<Option<smoltcp::wire::IpEndpoint>>,
+    /// True if socket was explicitly bound by user, false if implicitly bound by connect
+    explicitly_bound: bool,
 }
 
 impl BoundUdp {
@@ -144,6 +148,11 @@ impl BoundUdp {
 
     pub fn disconnect(&self) {
         self.remote.lock().take();
+    }
+
+    /// Returns true if this socket should be unbound on disconnect
+    pub fn should_unbind_on_disconnect(&self) -> bool {
+        !self.explicitly_bound
     }
 
     #[inline]
@@ -194,12 +203,41 @@ impl BoundUdp {
         buf: &[u8],
         to: Option<smoltcp::wire::IpEndpoint>,
     ) -> Result<usize, SystemError> {
-        let remote = to.or(*self.remote.lock()).ok_or(SystemError::ENOTCONN)?;
+        let connected_remote = *self.remote.lock();
+        let mut remote = to.or(connected_remote).ok_or(SystemError::ENOTCONN)?;
+
+        // Linux treats sending to 0.0.0.0 (INADDR_ANY) as sending to localhost
+        // smoltcp rejects it as "Unaddressable", so we translate it here
+        if remote.addr.is_unspecified() {
+            remote.addr = smoltcp::wire::IpAddress::v4(127, 0, 0, 1);
+            log::debug!("UDP try_send: translated unspecified address to loopback");
+        }
+
+        log::debug!(
+            "UDP try_send: to={:?}, connected={:?}, final_remote={:?}, buf_len={}",
+            to,
+            connected_remote,
+            remote,
+            buf.len()
+        );
+
         let result = self.with_mut_socket(|socket| {
-            if socket.can_send() && socket.send_slice(buf, remote).is_ok() {
-                // log::debug!("send {} bytes", buf.len());
-                return Ok(buf.len());
+            let can_send = socket.can_send();
+            log::debug!("UDP try_send: can_send={}", can_send);
+
+            if can_send {
+                match socket.send_slice(buf, remote) {
+                    Ok(_) => {
+                        log::debug!("UDP send {} bytes to {:?} OK", buf.len(), remote);
+                        return Ok(buf.len());
+                    }
+                    Err(e) => {
+                        log::warn!("UDP send_slice failed: {:?}", e);
+                        return Err(SystemError::ENOBUFS);
+                    }
+                }
             }
+            log::warn!("UDP cannot send (buffer full?)");
             return Err(SystemError::ENOBUFS);
         });
         return result;

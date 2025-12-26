@@ -151,6 +151,18 @@ impl UdpSocket {
         buf: &[u8],
         to: Option<smoltcp::wire::IpEndpoint>,
     ) -> Result<usize, SystemError> {
+        // Poll first to process any pending network events and free buffers
+        let iface = {
+            match self.inner.read().as_ref() {
+                Some(UdpInner::Bound(bound)) => Some(bound.inner().iface().clone()),
+                _ => None,
+            }
+        };
+
+        if let Some(iface) = &iface {
+            iface.poll();
+        }
+
         // Send data and get iface reference, then release lock before polling
         let (result, iface) = {
             let mut inner_guard = self.inner.write();
@@ -247,14 +259,27 @@ impl Socket for UdpSocket {
             }
             Endpoint::Unspecified => {
                 // AF_UNSPEC: disconnect the UDP socket (clear remote endpoint)
-                match self.inner.read().as_ref() {
-                    Some(UdpInner::Bound(inner)) => {
-                        inner.disconnect();
-                        Ok(())
+                // If socket was implicitly bound (by connect), unbind it
+                let should_unbind = {
+                    match self.inner.read().as_ref() {
+                        Some(UdpInner::Bound(inner)) => {
+                            inner.disconnect();
+                            inner.should_unbind_on_disconnect()
+                        }
+                        Some(UdpInner::Unbound(_)) => return Ok(()), // Already disconnected
+                        None => return Err(SystemError::EBADF),
                     }
-                    Some(UdpInner::Unbound(_)) => Ok(()), // Already disconnected
-                    None => Err(SystemError::EBADF),
+                };
+
+                if should_unbind {
+                    // Socket was implicitly bound by connect, unbind it
+                    let mut inner_guard = self.inner.write();
+                    if let Some(UdpInner::Bound(bound)) = inner_guard.take() {
+                        bound.close();
+                        inner_guard.replace(UdpInner::Unbound(UnboundUdp::new()));
+                    }
                 }
+                Ok(())
             }
             _ => Err(SystemError::EAFNOSUPPORT),
         }

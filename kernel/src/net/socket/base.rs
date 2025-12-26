@@ -40,7 +40,7 @@ pub trait Socket: PollableInode + IndexNode {
     /// ## Block
     /// 如果没有连接到来，会阻塞
     fn accept(&self) -> Result<(Arc<dyn Socket>, Endpoint), SystemError> {
-        Err(SystemError::ENOSYS)
+        Err(SystemError::EOPNOTSUPP_OR_ENOTSUP)
     }
 
     /// # `bind`
@@ -80,7 +80,7 @@ pub trait Socket: PollableInode + IndexNode {
     /// # `listen`
     /// 监听socket，仅用于stream socket
     fn listen(&self, _backlog: usize) -> Result<(), SystemError> {
-        Err(SystemError::ENOSYS)
+        Err(SystemError::EOPNOTSUPP_OR_ENOTSUP)
     }
 
     // poll

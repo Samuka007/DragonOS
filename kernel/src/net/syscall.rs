@@ -314,24 +314,16 @@ impl Syscall {
         let flags = socket::PMSG::from_bits_truncate(flags);
 
         if addr.is_null() {
+            // Address pointer is null, just receive without returning sender address
             let (n, _) = socket.recv_from(buf, flags, None)?;
             return Ok(n);
         }
 
-        // address is not null
-        let address = unsafe { addr.as_ref() }.ok_or(SystemError::EINVAL)?;
-
-        if unsafe { address.is_empty() } {
-            let (recv_len, endpoint) = socket.recv_from(buf, flags, None)?;
-            endpoint.write_to_user(addr, addr_len)?;
-            return Ok(recv_len);
-        } else {
-            // 从socket中读取数据
-            let addr_len = *unsafe { addr_len.as_ref() }.ok_or(SystemError::EINVAL)?;
-            let address = SockAddr::to_endpoint(addr, addr_len)?;
-            let (recv_len, _) = socket.recv_from(buf, flags, Some(address))?;
-            return Ok(recv_len);
-        };
+        // Address pointer is not null, receive and write sender address to it
+        // Note: The content of addr doesn't matter - it's an output parameter
+        let (recv_len, endpoint) = socket.recv_from(buf, flags, None)?;
+        endpoint.write_to_user(addr, addr_len)?;
+        return Ok(recv_len);
     }
 
     /// @brief sys_recvmsg系统调用的实际执行函数
