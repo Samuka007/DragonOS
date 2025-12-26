@@ -130,7 +130,11 @@ impl Loopback {
     /// - buffer：需要发送的数据包
     pub fn loopback_transmit(&mut self, buffer: Vec<u8>) {
         // debug!("lo transmit:{:?}", buffer);
-        self.queue.push_back(buffer)
+        self.queue.push_back(buffer);
+
+        // Wake the network polling thread to process the queued packet
+        // Loopback doesn't have hardware interrupts, so we need to explicitly wake the thread
+        INIT_NET_NAMESPACE.wakeup_poll_thread();
     }
 }
 

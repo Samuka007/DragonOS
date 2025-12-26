@@ -5,13 +5,13 @@ use system_error::SystemError;
 use crate::filesystem::epoll::EPollEventType;
 use crate::filesystem::vfs::{fasync::FAsyncItems, vcore::generate_inode_id, InodeId};
 use crate::libs::wait_queue::WaitQueue;
-use crate::net::socket::common::EPollItems;
+use crate::net::socket::common::{EPollItems, ShutdownBit};
 use crate::net::socket::{Socket, PMSG};
 use crate::process::namespace::net_namespace::NetNamespace;
 use crate::process::ProcessManager;
 use crate::{libs::rwlock::RwLock, net::socket::endpoint::Endpoint};
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use super::InetSocket;
 
@@ -25,6 +25,7 @@ type EP = crate::filesystem::epoll::EPollEventType;
 pub struct UdpSocket {
     inner: RwLock<Option<UdpInner>>,
     nonblock: AtomicBool,
+    shutdown: AtomicU8,
     wait_queue: WaitQueue,
     inode_id: InodeId,
     self_ref: Weak<UdpSocket>,
@@ -39,6 +40,7 @@ impl UdpSocket {
         Arc::new_cyclic(|me| Self {
             inner: RwLock::new(Some(UdpInner::Unbound(UnboundUdp::new()))),
             nonblock: AtomicBool::new(nonblock),
+            shutdown: AtomicU8::new(0),
             wait_queue: WaitQueue::default(),
             inode_id: generate_inode_id(),
             self_ref: me.clone(),
@@ -242,6 +244,22 @@ impl Socket for UdpSocket {
         }
     }
 
+    fn recv_bytes_available(&self) -> usize {
+        match self.inner.read().as_ref() {
+            Some(UdpInner::Bound(bound)) => {
+                // For UDP, FIONREAD should return the size of the first packet,
+                // not the total bytes in the queue
+                bound.with_mut_socket(|socket| {
+                    match socket.peek() {
+                        Ok((payload, _)) => payload.len(),
+                        Err(_) => 0, // No packets available
+                    }
+                })
+            }
+            _ => 0,
+        }
+    }
+
     fn connect(&self, endpoint: Endpoint) -> Result<(), SystemError> {
         match endpoint {
             Endpoint::Ip(remote) => {
@@ -286,6 +304,12 @@ impl Socket for UdpSocket {
     }
 
     fn send(&self, buffer: &[u8], flags: PMSG) -> Result<usize, SystemError> {
+        // Check if write is shutdown (0x02 = SEND_SHUTDOWN)
+        let shutdown_bits = self.shutdown.load(Ordering::Acquire);
+        if shutdown_bits & 0x02 != 0 {
+            return Err(SystemError::EPIPE);
+        }
+
         if flags.contains(PMSG::DONTWAIT) {
             log::warn!("Nonblock send is not implemented yet");
         }
@@ -294,6 +318,12 @@ impl Socket for UdpSocket {
     }
 
     fn send_to(&self, buffer: &[u8], flags: PMSG, address: Endpoint) -> Result<usize, SystemError> {
+        // Check if write is shutdown (0x02 = SEND_SHUTDOWN)
+        let shutdown_bits = self.shutdown.load(Ordering::Acquire);
+        if shutdown_bits & 0x02 != 0 {
+            return Err(SystemError::EPIPE);
+        }
+
         if flags.contains(PMSG::DONTWAIT) {
             log::warn!("Nonblock send is not implemented yet");
         }
@@ -306,6 +336,12 @@ impl Socket for UdpSocket {
     }
 
     fn recv(&self, buffer: &mut [u8], flags: PMSG) -> Result<usize, SystemError> {
+        // Check if read is shutdown - return 0 (EOF) if shutdown (0x01 = RCV_SHUTDOWN)
+        let shutdown_bits = self.shutdown.load(Ordering::Acquire);
+        if shutdown_bits & 0x01 != 0 {
+            return Ok(0);
+        }
+
         if self.is_nonblock() || flags.contains(PMSG::DONTWAIT) {
             self.try_recv(buffer)
         } else {
@@ -350,6 +386,41 @@ impl Socket for UdpSocket {
 
     fn do_close(&self) -> Result<(), SystemError> {
         self.close();
+        Ok(())
+    }
+
+    fn shutdown(&self, how: ShutdownBit) -> Result<(), SystemError> {
+        // For UDP, SHUT_WR requires the socket to be connected
+        if how.is_send_shutdown() || how.is_both_shutdown() {
+            // Check if socket is connected
+            match self.inner.read().as_ref() {
+                Some(UdpInner::Bound(bound)) => {
+                    if bound.remote_endpoint().is_err() {
+                        return Err(SystemError::ENOTCONN);
+                    }
+                }
+                Some(UdpInner::Unbound(_)) => {
+                    return Err(SystemError::ENOTCONN);
+                }
+                None => return Err(SystemError::EBADF),
+            }
+        }
+
+        // Set the shutdown bits atomically
+        // Use fetch_or to set the bits we want
+        let old = self.shutdown.fetch_or(
+            (if how.is_recv_shutdown() { 0x01 } else { 0 })
+                | (if how.is_send_shutdown() { 0x02 } else { 0 }),
+            Ordering::Release,
+        );
+
+        log::debug!(
+            "UDP shutdown: old={:#x}, recv={}, send={}",
+            old,
+            how.is_recv_shutdown(),
+            how.is_send_shutdown()
+        );
+
         Ok(())
     }
 
@@ -435,6 +506,11 @@ impl InetSocket for UdpSocket {
     fn on_iface_events(&self) {
         // Wake up any threads waiting on this socket
         self.wait_queue.wakeup_all(None);
+
+        // Notify epoll/poll watchers about socket state changes
+        let pollflag = self.check_io_event();
+        use crate::filesystem::epoll::event_poll::EventPoll;
+        let _ = EventPoll::wakeup_epoll(self.epoll_items().as_ref(), pollflag);
     }
 }
 
