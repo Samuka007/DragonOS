@@ -135,8 +135,36 @@ impl UdpSocket {
         match self.inner.read().as_ref().ok_or(SystemError::EBADF)? {
             UdpInner::Bound(bound) => {
                 // Poll BEFORE try_recv to receive any pending packets
-                bound.inner().iface().poll();
-                bound.try_recv(buf)
+                let iface = bound.inner().iface();
+                iface.poll();
+
+                // Try to receive
+                let result = bound.try_recv(buf);
+
+                // For loopback packets, if we got EAGAIN, poll a few more times
+                // to allow packets to propagate through the loopback interface
+                if matches!(result, Err(SystemError::EAGAIN_OR_EWOULDBLOCK)) {
+                    // Check if bound to loopback address
+                    let local_endpoint = bound.endpoint();
+                    let is_loopback = if let Some(addr) = local_endpoint.addr {
+                        matches!(addr, smoltcp::wire::IpAddress::Ipv4(ipv4) if ipv4.octets()[0] == 127)
+                    } else {
+                        false
+                    };
+
+                    if is_loopback {
+                        // Poll up to 5 more times for loopback to ensure packet delivery
+                        for _ in 0..5 {
+                            iface.poll();
+                            let retry = bound.try_recv(buf);
+                            if !matches!(retry, Err(SystemError::EAGAIN_OR_EWOULDBLOCK)) {
+                                return retry;
+                            }
+                        }
+                    }
+                }
+
+                result
             }
             // UDP is connectionless - unbound socket just has no data yet
             UdpInner::Unbound(_) => Err(SystemError::EAGAIN_OR_EWOULDBLOCK),
@@ -221,6 +249,36 @@ impl UdpSocket {
         // Poll AFTER releasing the lock to avoid deadlock
         // when socket sends to itself on loopback
         iface.poll();
+
+        // For loopback packets, we need to wake up the polling thread to ensure timely delivery
+        // The polling thread processes packets from TX -> loopback -> RX
+        if let Ok(_) = &result {
+            let is_loopback = if let Some(to_endpoint) = to {
+                // Check if destination is loopback (127.0.0.0/8)
+                matches!(to_endpoint.addr, smoltcp::wire::IpAddress::Ipv4(addr) if addr.octets()[0] == 127)
+            } else {
+                // Connected socket - check if remote is loopback
+                if let Some(inner_read) = self.inner.try_read() {
+                    if let Some(UdpInner::Bound(bound)) = inner_read.as_ref() {
+                        if let Ok(remote) = bound.remote_endpoint() {
+                            matches!(remote.addr, smoltcp::wire::IpAddress::Ipv4(addr) if addr.octets()[0] == 127)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+
+            if is_loopback {
+                // Wake up the network polling thread to process loopback packets immediately
+                // This ensures packets are delivered from TX -> loopback -> RX without delay
+                self.netns().wakeup_poll_thread();
+            }
+        }
 
         result
     }

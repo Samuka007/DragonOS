@@ -226,6 +226,7 @@ impl Syscall {
     /// @return 成功返回0，失败返回错误码
     pub fn connect(fd: usize, addr: *const SockAddr, addrlen: u32) -> Result<usize, SystemError> {
         let endpoint: Endpoint = SockAddr::to_endpoint(addr, addrlen)?;
+        log::debug!("sys_connect: fd={}, endpoint={:?}, addrlen={}", fd, endpoint, addrlen);
         ProcessManager::current_pcb()
             .get_socket_inode(fd as i32)?
             .as_socket()
@@ -256,6 +257,7 @@ impl Syscall {
         }
 
         let endpoint: Endpoint = SockAddr::to_endpoint(addr, addrlen)?;
+        log::debug!("sys_bind: fd={}, endpoint={:?}, addrlen={}", fd, endpoint, addrlen);
         ProcessManager::current_pcb()
             .get_socket_inode(fd as i32)?
             .as_socket()
@@ -493,12 +495,13 @@ impl Syscall {
         if addr.is_null() {
             return Err(SystemError::EINVAL);
         }
-        ProcessManager::current_pcb()
+        let endpoint = ProcessManager::current_pcb()
             .get_socket_inode(fd as i32)?
             .as_socket()
             .unwrap()
-            .local_endpoint()?
-            .write_to_user(addr, addrlen)?;
+            .local_endpoint()?;
+        log::debug!("sys_getsockname: fd={}, endpoint={:?}", fd, endpoint);
+        endpoint.write_to_user(addr, addrlen)?;
         return Ok(0);
     }
 
@@ -518,12 +521,13 @@ impl Syscall {
             return Err(SystemError::EINVAL);
         }
 
-        ProcessManager::current_pcb()
+        let endpoint = ProcessManager::current_pcb()
             .get_socket_inode(fd as i32)?
             .as_socket()
             .unwrap()
-            .remote_endpoint()?
-            .write_to_user(addr, addrlen)?;
+            .remote_endpoint()?;
+        log::debug!("sys_getpeername: fd={}, endpoint={:?}", fd, endpoint);
+        endpoint.write_to_user(addr, addrlen)?;
 
         return Ok(0);
     }

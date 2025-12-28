@@ -43,11 +43,14 @@ impl UnboundUdp {
         let inner = BoundInner::bind(self.socket, &local_endpoint.addr, netns)?;
         let bind_addr = local_endpoint.addr;
         let bind_port = if local_endpoint.port == 0 {
-            inner.port_manager().bind_ephemeral_port(InetTypes::Udp)?
+            let port = inner.port_manager().bind_ephemeral_port(InetTypes::Udp)?;
+            log::debug!("UnboundUdp::bind: allocated ephemeral port {}", port);
+            port
         } else {
             inner
                 .port_manager()
                 .bind_port(InetTypes::Udp, local_endpoint.port)?;
+            log::debug!("UnboundUdp::bind: explicit bind to port {}", local_endpoint.port);
             local_endpoint.port
         };
 
@@ -70,6 +73,7 @@ impl UnboundUdp {
             inner,
             remote: SpinLock::new(None),
             explicitly_bound: true,
+            has_preconnect_data: SpinLock::new(false),
         })
     }
 
@@ -80,6 +84,7 @@ impl UnboundUdp {
     ) -> Result<BoundUdp, SystemError> {
         let (inner, local_addr) = BoundInner::bind_ephemeral(self.socket, remote, netns)?;
         let bound_port = inner.port_manager().bind_ephemeral_port(InetTypes::Udp)?;
+        log::debug!("UnboundUdp::bind_ephemeral: allocated ephemeral port {} for remote {:?}", bound_port, remote);
 
         // Bind the smoltcp socket to the local endpoint
         if local_addr.is_unspecified() {
@@ -102,6 +107,7 @@ impl UnboundUdp {
             inner,
             remote: SpinLock::new(None),
             explicitly_bound: false,
+            has_preconnect_data: SpinLock::new(false),
         })
     }
 }
@@ -112,6 +118,8 @@ pub struct BoundUdp {
     remote: SpinLock<Option<smoltcp::wire::IpEndpoint>>,
     /// True if socket was explicitly bound by user, false if implicitly bound by connect
     explicitly_bound: bool,
+    /// Whether there were buffered packets at connect time - if true, allow next recv without filtering
+    has_preconnect_data: SpinLock<bool>,
 }
 
 impl BoundUdp {
@@ -143,6 +151,14 @@ impl BoundUdp {
     }
 
     pub fn connect(&self, remote: smoltcp::wire::IpEndpoint) {
+        let local = self.endpoint();
+        log::debug!("BoundUdp::connect: local={:?}, connecting to remote={:?}", local, remote);
+
+        // Check if there are buffered packets - if so, allow next recv without filtering
+        let has_buffered = self.with_socket(|socket| socket.can_recv());
+        *self.has_preconnect_data.lock() = has_buffered;
+        log::debug!("BoundUdp::connect: has pre-connect data = {}", has_buffered);
+
         self.remote.lock().replace(remote);
     }
 
@@ -161,38 +177,74 @@ impl BoundUdp {
         buf: &mut [u8],
     ) -> Result<(usize, smoltcp::wire::IpEndpoint), SystemError> {
         let remote = *self.remote.lock();
+        let endpoint = self.endpoint();
+        log::debug!("BoundUdp::try_recv: endpoint={:?}, buf_len={}, connected={:?}",
+                    endpoint, buf.len(), remote);
 
+        log::debug!("BoundUdp::try_recv: about to call with_mut_socket");
         self.with_mut_socket(|socket| {
-            // If connected, filter packets by source address
+            log::debug!("BoundUdp::try_recv: inside with_mut_socket closure");
+            let can_recv = socket.can_recv();
+            log::debug!("BoundUdp::try_recv: socket.can_recv()={}", can_recv);
+
+            // If connected, filter packets by source address (except pre-connect packets)
             if let Some(expected_remote) = remote {
+                // Check if we should accept pre-connect data without filtering
+                let mut has_preconnect = self.has_preconnect_data.lock();
+                if *has_preconnect {
+                    // Clear the flag - we only allow ONE unfiltered recv
+                    *has_preconnect = false;
+                    drop(has_preconnect);  // Release lock before recv
+                    if socket.can_recv() {
+                        if let Ok((size, metadata)) = socket.recv_slice(buf) {
+                            log::debug!("BoundUdp::try_recv: received pre-connect packet {} bytes from {:?}",
+                                        size, metadata.endpoint);
+                            return Ok((size, metadata.endpoint));
+                        }
+                    }
+                    log::debug!("BoundUdp::try_recv: pre-connect data flag set but no data available");
+                    return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
+                }
+                drop(has_preconnect);  // Release lock
+
                 // Loop to skip packets from unexpected sources
                 loop {
                     if !socket.can_recv() {
+                        log::debug!("BoundUdp::try_recv: connected socket, no data -> EAGAIN");
                         return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
                     }
 
                     // Peek to check source address before receiving
                     if let Ok((_size, metadata)) = socket.peek_slice(buf) {
+                        log::debug!("BoundUdp::try_recv: peeked packet from {:?}, expecting {:?}",
+                                    metadata.endpoint, expected_remote);
                         if metadata.endpoint == expected_remote {
                             // Source matches, receive the packet
                             if let Ok((size, metadata)) = socket.recv_slice(buf) {
+                                log::debug!("BoundUdp::try_recv: received {} bytes from {:?}",
+                                            size, metadata.endpoint);
                                 return Ok((size, metadata.endpoint));
                             }
                         } else {
                             // Source doesn't match, discard this packet and check next
+                            log::debug!("BoundUdp::try_recv: discarding packet from wrong source");
                             let _ = socket.recv_slice(buf);
                             continue;
                         }
                     }
+                    log::debug!("BoundUdp::try_recv: peek failed -> EAGAIN");
                     return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
                 }
             } else {
                 // Not connected, receive from any source
                 if socket.can_recv() {
                     if let Ok((size, metadata)) = socket.recv_slice(buf) {
+                        log::debug!("BoundUdp::try_recv: unconnected socket received {} bytes from {:?}",
+                                    size, metadata.endpoint);
                         return Ok((size, metadata.endpoint));
                     }
                 }
+                log::debug!("BoundUdp::try_recv: unconnected socket, no data -> EAGAIN");
                 return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
             }
         })
