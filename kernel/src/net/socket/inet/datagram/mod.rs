@@ -441,32 +441,39 @@ impl Socket for UdpSocket {
     }
 
     fn recv(&self, buffer: &mut [u8], flags: PMSG) -> Result<usize, SystemError> {
-        // Check if read is shutdown - return 0 (EOF) if shutdown (0x01 = RCV_SHUTDOWN)
+        // Check if read is shutdown
+        // Linux allows reading buffered data even after SHUT_RD, only returns EOF when buffer is empty
         let shutdown_bits = self.shutdown.load(Ordering::Acquire);
-        if shutdown_bits & 0x01 != 0 {
-            return Ok(0);
-        }
+        let is_recv_shutdown = shutdown_bits & 0x01 != 0;
 
         if self.is_nonblock() || flags.contains(PMSG::DONTWAIT) {
-            self.try_recv(buffer)
+            let result = self.try_recv(buffer);
+            // If shutdown and no data available, return EOF instead of EWOULDBLOCK
+            if is_recv_shutdown && matches!(result, Err(SystemError::EAGAIN_OR_EWOULDBLOCK)) {
+                return Ok(0);
+            }
+            return result.map(|(len, _)| len);
         } else {
             loop {
-                // Re-check shutdown state inside the loop in case shutdown was called
-                // while we were blocked
+                // Re-check shutdown state inside the loop
                 let shutdown_bits = self.shutdown.load(Ordering::Acquire);
-                if shutdown_bits & 0x01 != 0 {
-                    return Ok(0);
-                }
+                let is_recv_shutdown = shutdown_bits & 0x01 != 0;
 
                 match self.try_recv(buffer) {
+                    Ok((len, endpoint)) => {
+                        return Ok(len);
+                    }
                     Err(SystemError::EAGAIN_OR_EWOULDBLOCK) => {
+                        // If shutdown and no data available, return EOF
+                        if is_recv_shutdown {
+                            return Ok(0);
+                        }
                         wq_wait_event_interruptible!(self.wait_queue, self.can_recv(), {})?;
                     }
-                    result => break result,
+                    Err(e) => return Err(e),
                 }
             }
         }
-        .map(|(len, _)| len)
     }
 
     fn recv_from(
@@ -475,20 +482,10 @@ impl Socket for UdpSocket {
         flags: PMSG,
         address: Option<Endpoint>,
     ) -> Result<(usize, Endpoint), SystemError> {
-        // Check if read is shutdown - for recvfrom, we need to return an error
-        // but we can't return (0, endpoint) without a valid endpoint, so we return EAGAIN
-        // However, if the socket is connected, we can get the remote endpoint
+        // Linux allows reading buffered data even after SHUT_RD
+        // Only return EOF when buffer is empty
         let shutdown_bits = self.shutdown.load(Ordering::Acquire);
-        if shutdown_bits & 0x01 != 0 {
-            // If connected, we can return (0, remote_endpoint) like EOF
-            if let Some(UdpInner::Bound(bound)) = self.inner.read().as_ref() {
-                if let Ok(remote) = bound.remote_endpoint() {
-                    return Ok((0, Endpoint::Ip(remote)));
-                }
-            }
-            // Not connected, can't provide endpoint, return error
-            return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
-        }
+        let is_recv_shutdown = shutdown_bits & 0x01 != 0;
 
         // could block io
         if let Some(endpoint) = address {
@@ -496,32 +493,47 @@ impl Socket for UdpSocket {
         }
 
         return if self.is_nonblock() || flags.contains(PMSG::DONTWAIT) {
-            self.try_recv(buffer)
+            let result = self.try_recv(buffer);
+            // If shutdown and no data available, return EOF
+            if is_recv_shutdown && matches!(result, Err(SystemError::EAGAIN_OR_EWOULDBLOCK)) {
+                // If connected, we can return (0, remote_endpoint)
+                if let Some(UdpInner::Bound(bound)) = self.inner.read().as_ref() {
+                    if let Ok(remote) = bound.remote_endpoint() {
+                        return Ok((0, Endpoint::Ip(remote)));
+                    }
+                }
+                // Not connected, can't provide endpoint, return error
+                return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
+            }
+            result.map(|(len, endpoint)| (len, Endpoint::Ip(endpoint)))
         } else {
             loop {
-                // Re-check shutdown state inside the loop in case shutdown was called
-                // while we were blocked
+                // Re-check shutdown state inside the loop
                 let shutdown_bits = self.shutdown.load(Ordering::Acquire);
-                if shutdown_bits & 0x01 != 0 {
-                    // If connected, return EOF with remote endpoint
-                    if let Some(UdpInner::Bound(bound)) = self.inner.read().as_ref() {
-                        if let Ok(remote) = bound.remote_endpoint() {
-                            return Ok((0, Endpoint::Ip(remote)));
-                        }
-                    }
-                    return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
-                }
+                let is_recv_shutdown = shutdown_bits & 0x01 != 0;
 
                 match self.try_recv(buffer) {
+                    Ok((len, endpoint)) => {
+                        return Ok((len, Endpoint::Ip(endpoint)));
+                    }
                     Err(SystemError::EAGAIN_OR_EWOULDBLOCK) => {
+                        // If shutdown and no data available, return EOF
+                        if is_recv_shutdown {
+                            // If connected, return EOF with remote endpoint
+                            if let Some(UdpInner::Bound(bound)) = self.inner.read().as_ref() {
+                                if let Ok(remote) = bound.remote_endpoint() {
+                                    return Ok((0, Endpoint::Ip(remote)));
+                                }
+                            }
+                            return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
+                        }
                         wq_wait_event_interruptible!(self.wait_queue, self.can_recv(), {})?;
                         // log::debug!("UdpSocket::recv_from: wake up");
                     }
-                    result => break result,
+                    Err(e) => return Err(e),
                 }
             }
-        }
-        .map(|(len, remote)| (len, Endpoint::Ip(remote)));
+        };
     }
 
     fn do_close(&self) -> Result<(), SystemError> {

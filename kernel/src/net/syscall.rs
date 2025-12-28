@@ -369,6 +369,36 @@ impl Syscall {
         return Ok(recv_size);
     }
 
+    /// @brief sys_sendmsg系统调用的实际执行函数
+    ///
+    /// @param fd 文件描述符
+    /// @param msg 消息头
+    /// @param flags 标志
+    ///
+    /// @return 成功返回发送的字节数，失败返回错误码
+    pub fn sendmsg(fd: usize, msg: &MsgHdr, flags: u32) -> Result<usize, SystemError> {
+        // 检查每个缓冲区地址是否合法，生成iovecs
+        let iovs = unsafe { IoVecs::from_user(msg.msg_iov, msg.msg_iovlen, false)? };
+
+        let socket_inode = ProcessManager::current_pcb().get_socket_inode(fd as i32)?;
+        let socket = socket_inode.as_socket().unwrap();
+
+        let flags = socket::PMSG::from_bits_truncate(flags);
+
+        // Gather all iovecs into a single buffer
+        let data = iovs.gather()?;
+
+        // Check if destination address is provided
+        if !msg.msg_name.is_null() && msg.msg_namelen > 0 {
+            // Send to specific address
+            let endpoint = SockAddr::to_endpoint(msg.msg_name, msg.msg_namelen)?;
+            socket.send_to(&data, flags, endpoint)
+        } else {
+            // Send using connected endpoint
+            socket.send(&data, flags)
+        }
+    }
+
     /// @brief sys_listen系统调用的实际执行函数
     ///
     /// @param fd 文件描述符
