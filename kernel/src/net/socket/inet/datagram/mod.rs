@@ -145,13 +145,23 @@ impl UdpSocket {
 
     #[inline]
     pub fn can_recv(&self) -> bool {
-        self.check_io_event().contains(EP::EPOLLIN)
+        // Can receive if there's data available OR if read is shutdown
+        // (shutdown should wake up recv() to return 0/EOF)
+        let has_data = self.check_io_event().contains(EP::EPOLLIN);
+        let shutdown_bits = self.shutdown.load(Ordering::Acquire);
+        let read_shutdown = (shutdown_bits & 0x01) != 0;
+        has_data || read_shutdown
     }
 
     #[inline]
     #[allow(dead_code)]
     pub fn can_send(&self) -> bool {
-        self.check_io_event().contains(EP::EPOLLOUT)
+        // Can send if socket is ready OR if write is shutdown
+        // (shutdown should wake up send() to return EPIPE)
+        let can_write = self.check_io_event().contains(EP::EPOLLOUT);
+        let shutdown_bits = self.shutdown.load(Ordering::Acquire);
+        let write_shutdown = (shutdown_bits & 0x02) != 0;
+        can_write || write_shutdown
     }
 
     pub fn try_send(
