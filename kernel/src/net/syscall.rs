@@ -351,6 +351,11 @@ impl Syscall {
 
             let flags = socket::PMSG::from_bits_truncate(flags);
 
+            // Check for MSG_ERRQUEUE - we don't support error queues yet
+            if flags.contains(socket::PMSG::ERRQUEUE) {
+                return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
+            }
+
             let mut buf = iovs.new_buf(true);
             // 从socket中读取数据
             let recv_size = socket.recv(&mut buf, flags)?;
