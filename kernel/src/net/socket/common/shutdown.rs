@@ -29,7 +29,8 @@ impl TryFrom<usize> for ShutdownBit {
 
     fn try_from(value: usize) -> Result<Self, Self::Error> {
         match value {
-            0..2 => Ok(ShutdownBit {
+            // SHUT_RD = 0, SHUT_WR = 1, SHUT_RDWR = 2
+            0..=2 => Ok(ShutdownBit {
                 bit: value as u8 + 1,
             }),
             _ => Err(Self::Error::EINVAL),

@@ -1,4 +1,4 @@
-use inner::{UdpInner, UnboundUdp};
+use inner::{UdpInner, UnboundUdp, DEFAULT_RX_BUF_SIZE, DEFAULT_TX_BUF_SIZE};
 use smoltcp;
 use system_error::SystemError;
 
@@ -604,6 +604,50 @@ impl Socket for UdpSocket {
                     self.recv_buf_size.store(size, Ordering::Release);
                     log::debug!("UDP setsockopt SO_RCVBUF: {}", size);
                     return Ok(());
+                }
+                _ => {
+                    return Err(SystemError::ENOPROTOOPT);
+                }
+            }
+        }
+        Err(SystemError::ENOPROTOOPT)
+    }
+
+    fn option(&self, level: PSOL, name: usize, value: &mut [u8]) -> Result<usize, SystemError> {
+        if level == PSOL::SOCKET {
+            let opt = PSO::try_from(name as u32).map_err(|_| SystemError::ENOPROTOOPT)?;
+            match opt {
+                PSO::SNDBUF => {
+                    if value.len() < core::mem::size_of::<u32>() {
+                        return Err(SystemError::EINVAL);
+                    }
+                    let size = self.send_buf_size.load(Ordering::Acquire);
+                    // Linux doubles the value when returning it
+                    // If 0 (not set), return default size
+                    let actual_size = if size == 0 {
+                        DEFAULT_TX_BUF_SIZE * 2
+                    } else {
+                        size * 2
+                    };
+                    let bytes = (actual_size as u32).to_ne_bytes();
+                    value[0..4].copy_from_slice(&bytes);
+                    return Ok(core::mem::size_of::<u32>());
+                }
+                PSO::RCVBUF => {
+                    if value.len() < core::mem::size_of::<u32>() {
+                        return Err(SystemError::EINVAL);
+                    }
+                    let size = self.recv_buf_size.load(Ordering::Acquire);
+                    // Linux doubles the value when returning it
+                    // If 0 (not set), return default size
+                    let actual_size = if size == 0 {
+                        DEFAULT_RX_BUF_SIZE * 2
+                    } else {
+                        size * 2
+                    };
+                    let bytes = (actual_size as u32).to_ne_bytes();
+                    value[0..4].copy_from_slice(&bytes);
+                    return Ok(core::mem::size_of::<u32>());
                 }
                 _ => {
                     return Err(SystemError::ENOPROTOOPT);
